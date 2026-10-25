@@ -1,0 +1,15 @@
+# Example envgit policy — see docs/design.md §3.2
+filesystem:
+  read:  { deny: ["~/.ssh", "~/.aws", "**/.env"], allow: ["."] }
+  write: { allow: [".", "/tmp"], deny: [".env"] }
+network:
+  allow: ["api.github.com:443", "registry.npmjs.org"]
+  l7:
+    api.github.com: { methods: [GET] }
+capabilities:
+  github: [listIssues, getIssue]
+  fs: true
+  shell: false
+irreversible:
+  - net: { host: "github.com", method: POST, path: "/repos/*/git/*" }
+  - shell: ["git push", "npm publish"]

@@ -1,0 +1,19 @@
+/** Policy file shape. See docs/design.md §3.2 */
+
+export interface Policy {
+  filesystem?: {
+    read?: { allow?: string[]; deny?: string[] }
+    write?: { allow?: string[]; deny?: string[] }
+  }
+  network?: {
+    allow?: string[]
+    deny?: string[]
+    l7?: Record<string, { methods?: string[]; paths?: string[] }>
+  }
+  capabilities?: Record<string, boolean | string[]>
+  irreversible?: IrreversibleRule[]
+}
+
+export type IrreversibleRule =
+  | { net: { host: string; method?: string; path?: string } }
+  | { shell: string[] }
