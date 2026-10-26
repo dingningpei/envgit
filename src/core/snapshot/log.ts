@@ -1,6 +1,6 @@
 /** Append-only action log. See docs/design.md §2 */
 import { randomBytes } from 'node:crypto'
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Effect, SnapshotId } from '../env/backend.js'
 import type { SnapshotStore } from './store.js'
@@ -33,20 +33,61 @@ export interface SessionMeta {
 }
 
 export async function openSession(root: string, backend: string): Promise<OpenSession> {
-  const currentFile = join(root, 'current')
-  const current = await readFile(currentFile, 'utf8').then(s => s.trim(), () => '')
-  if (current) {
-    const dir = join(root, 'sessions', current)
-    const meta = JSON.parse(await readFile(join(dir, 'session.json'), 'utf8')) as SessionMeta
-    return { dir, meta }
-  }
+  const current = await readFile(join(root, 'current'), 'utf8').then(s => s.trim(), () => '')
+  if (!current) return createSession(root, backend)
+  const dir = join(root, 'sessions', current)
+  const meta = JSON.parse(await readFile(join(dir, 'session.json'), 'utf8')) as SessionMeta
+  return { dir, meta }
+}
+
+/** Starts a new session and makes it current. Older sessions stay for audit. */
+export async function createSession(root: string, backend: string): Promise<OpenSession> {
   const createdAt = new Date().toISOString()
   const meta: SessionMeta = { id: `${createdAt.replace(/[-:.]/g, '').slice(0, 15)}-${randomBytes(3).toString('hex')}`, createdAt, backend }
   const dir = join(root, 'sessions', meta.id)
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, 'session.json'), JSON.stringify(meta, null, 2) + '\n', { flag: 'wx' })
-  await writeFile(currentFile, meta.id + '\n')
+  await writeFile(join(root, 'current'), meta.id + '\n')
   return { dir, meta }
+}
+
+/** Every snapshot any session still refers to, abandoned branches included. */
+export async function liveSnapshots(root: string): Promise<Set<SnapshotId>> {
+  const live = new Set<SnapshotId>()
+  const ids = await readdir(join(root, 'sessions')).catch(() => [] as string[])
+  for (const id of ids) {
+    const dir = join(root, 'sessions', id)
+    const meta = await readFile(join(dir, 'session.json'), 'utf8').then(t => JSON.parse(t) as SessionMeta, () => undefined)
+    if (meta?.base) live.add(meta.base)
+    for (const step of await readSteps(dir)) if (step.snapshot) live.add(step.snapshot)
+  }
+  return live
+}
+
+/**
+ * `.envgit/busy` holds the pid of a process between running a step and recording it, so a rewind
+ * cannot restore files underneath a step that is still writing them.
+ */
+export async function acquireBusy(root: string): Promise<void> {
+  const holder = await busyHolder(root)
+  if (holder !== undefined && holder !== process.pid) throw new Error(`another envgit process (pid ${holder}) is running a step here`)
+  await writeFile(join(root, 'busy'), `${process.pid}\n`)
+}
+
+export async function releaseBusy(root: string): Promise<void> {
+  if ((await busyHolder(root)) === process.pid) await rm(join(root, 'busy'), { force: true })
+}
+
+/** The live pid holding the busy lock, if any. A stale lock (dead pid) counts as free. */
+export async function busyHolder(root: string): Promise<number | undefined> {
+  const pid = Number(await readFile(join(root, 'busy'), 'utf8').catch(() => ''))
+  if (!pid) return undefined
+  try {
+    process.kill(pid, 0)
+    return pid
+  } catch {
+    return undefined
+  }
 }
 
 export async function readSteps(sessionDir: string): Promise<Step[]> {

@@ -1,4 +1,6 @@
-import { copyFile, mkdir, mkdtemp, readdir, readFile, realpath } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -74,5 +76,24 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect(last.exitCode).toBe(1)
     expect(last.effects).toContainEqual({ kind: 'fs', op: 'read', path: ssh, denied: true })
     expect(log.slice(0, -1).every(s => !s.effects.some(e => e.kind === 'fs' && e.path === ssh))).toBe(true)
+  }, 30_000)
+
+  it('resets the REPL and says so after a rewind', async () => {
+    expect((await execute('let z = 5; z')).text).toMatch(/^5\n/)
+    await promisify(execFile)(process.execPath, [CLI, 'rewind', 'base', '--force'], { cwd: dir })
+    const r = await execute('typeof z')
+    expect(r.text).toMatch(/workdir was rewound to base; REPL variables were reset/)
+    expect(r.text).toMatch(/undefined/)
+  }, 60_000)
+
+  it('refuses to run a step while a rewind is unfinished', async () => {
+    const before = (await steps()).length
+    await writeFile(join(dir, '.envgit/restoring'), '{}')
+    const blocked = await execute('1 + 1')
+    expect(blocked.isError).toBe(true)
+    expect(blocked.text).toMatch(/rewind was interrupted/)
+    expect((await steps()).length).toBe(before)
+    await rm(join(dir, '.envgit/restoring'))
+    expect((await execute('1 + 1')).text).toMatch(/^2\n/)
   }, 30_000)
 })

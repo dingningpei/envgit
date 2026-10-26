@@ -1,4 +1,5 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -55,7 +56,7 @@ describe('SnapshotStore', () => {
 
   it('honors exclusions on snapshot and restore', async () => {
     const id = await store.snapshot(work, ['node_modules'])
-    expect((await store.read(id)).some(e => e.path.startsWith('node_modules'))).toBe(false)
+    expect((await store.read(id)).entries.some(e => e.path.startsWith('node_modules'))).toBe(false)
     await writeFile(join(work, 'node_modules/x.js'), 'kept')
     await store.restore(work, id, ['node_modules'])
     expect(await readFile(join(work, 'node_modules/x.js'), 'utf8')).toBe('kept')
@@ -68,6 +69,38 @@ describe('SnapshotStore', () => {
     expect(b).toBe(a)
     await writeFile(join(work, 'a.txt'), 'b')
     expect(await store.snapshot(work, [], await store.read(b))).not.toBe(a)
+  })
+
+  it('leaves FIFOs alone on snapshot and restore', async () => {
+    execFileSync('mkfifo', [join(work, 'pipe')])
+    const id = await store.snapshot(work)
+    expect((await store.read(id)).entries.some(e => e.path === 'pipe')).toBe(false)
+    await store.restore(work, id)
+    expect((await lstat(join(work, 'pipe'))).isFIFO()).toBe(true)
+  })
+
+  it('rehashes files modified close to the previous snapshot', async () => {
+    const before = await stat(join(work, 'a.txt'))
+    const first = await store.snapshot(work)
+    await writeFile(join(work, 'a.txt'), 'z')
+    await utimes(join(work, 'a.txt'), before.atime, before.mtime)
+    expect(await store.snapshot(work, [], await store.read(first))).not.toBe(first)
+  })
+
+  it('trusts cached hashes of files older than the previous snapshot', async () => {
+    const old = new Date(Date.now() - 3600_000)
+    await utimes(join(work, 'a.txt'), old, old)
+    const first = await store.snapshot(work)
+    await writeFile(join(work, 'a.txt'), 'z')
+    await utimes(join(work, 'a.txt'), old, old)
+    // Same size, mode and mtime as cached: not re-read, by design.
+    expect(await store.snapshot(work, [], await store.read(first))).toBe(first)
+  })
+
+  it('computes an id without writing when persist is false', async () => {
+    const id = await store.snapshot(work, [], undefined, { persist: false })
+    await expect(readdir(join(work, '.envgit'))).rejects.toThrow()
+    expect(await store.snapshot(work)).toBe(id)
   })
 
   it('copies a snapshot into another store', async () => {

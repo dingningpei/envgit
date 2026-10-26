@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { access, copyFile, mkdir } from 'node:fs/promises'
+import { access, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { serveMcp } from '../adapters/mcp/server.js'
@@ -8,18 +8,25 @@ import { matchIrreversible } from '../core/policy/compile.js'
 import { loadPolicy } from '../core/policy/load.js'
 import type { Policy } from '../core/policy/schema.js'
 import {
+  acquireBusy,
   activeChain,
+  busyHolder,
+  createSession,
   ensureBase,
+  liveSnapshots,
   openSession,
   readHead,
   readSteps,
   recordStep,
+  releaseBusy,
   snapshotOf,
   writeHead,
   writeMeta,
+  type OpenSession,
   type Snapshotting,
   type StepRef,
 } from '../core/snapshot/log.js'
+import type { SnapshotId } from '../core/env/backend.js'
 import { SnapshotStore } from '../core/snapshot/store.js'
 import { ReplSession } from '../repl/session.js'
 import { runWorker } from '../repl/worker.js'
@@ -35,6 +42,8 @@ const help = `envgit — version control for agent execution environments
   envgit log                     show the steps leading to the current state
   envgit rewind <step|base>      restore the workdir to a step (--force drops unrecorded edits)
   envgit fork <step|base> <dir>  materialize a step into a new directory with its own session
+  envgit session [new]           print the current session, or start a new one
+  envgit gc                      delete snapshots and blobs no session refers to
 
 Snapshots are fs-level on srt: files only, not memory or processes. Restart
 \`envgit mcp\` after a rewind.`
@@ -72,17 +81,14 @@ async function run(argv: string[]): Promise<number> {
     console.error('usage: envgit run <cmd...>')
     return 2
   }
-  if (!(await exists(POLICY))) {
-    console.error('envgit: no .envgit/policy.yaml here — run `envgit init` first')
-    return 1
-  }
-  const policy = await loadPolicy(POLICY)
+  const policy = await requireInit()
   const backend = new SrtBackend()
   const session = await openSession(ROOT, backend.name)
   const irreversible = matchIrreversible(policy, argv)
   if (irreversible) console.error(red(`envgit: irreversible action (${irreversible}) — not gated in M0, logging only`))
 
   const snap = snapshotting(policy)
+  await acquireBusy(ROOT)
   await ensureBase(session, snap)
   const env = await backend.create({ workdir: process.cwd(), policy, snapshots: snap })
   const ac = new AbortController()
@@ -107,17 +113,14 @@ async function run(argv: string[]): Promise<number> {
   } finally {
     process.off('SIGINT', onSigint)
     await backend.destroy(env)
+    await releaseBusy(ROOT)
   }
 }
 
 async function mcp(mode: 'repl' | 'tools'): Promise<number> {
   // stdout carries JSON-RPC; keep every diagnostic on stderr.
   console.log = console.error
-  if (!(await exists(POLICY))) {
-    console.error('envgit: no .envgit/policy.yaml here — run `envgit init` first')
-    return 1
-  }
-  const policy = await loadPolicy(POLICY)
+  const policy = await requireInit()
   const backend = new SrtBackend()
   const session = await openSession(ROOT, backend.name)
   const snap = snapshotting(policy)
@@ -140,7 +143,35 @@ function parseRef(arg: string | undefined): StepRef {
 
 async function requireInit(): Promise<Policy> {
   if (!(await exists(POLICY))) throw new Error('no .envgit/policy.yaml here — run `envgit init` first')
-  return loadPolicy(POLICY)
+  const policy = await loadPolicy(POLICY)
+  await recoverRestore(policy)
+  return policy
+}
+
+const RESTORING = join(ROOT, 'restoring')
+
+interface RestoreMarker {
+  session: string
+  target: StepRef
+  snapshot: SnapshotId
+}
+
+/** Restores the workdir and moves head, leaving a marker so an interrupted restore is finished later. */
+async function restoreTo(session: OpenSession, snap: Snapshotting, target: StepRef, snapshot: SnapshotId): Promise<void> {
+  await writeFile(RESTORING, JSON.stringify({ session: session.meta.id, target, snapshot } satisfies RestoreMarker))
+  await snap.store.restore(snap.workdir, snapshot, snap.exclude)
+  await writeHead(session.dir, target)
+  await rm(RESTORING)
+}
+
+/** Finishes a rewind that was interrupted; restore only touches what differs, so redoing it is safe. */
+async function recoverRestore(policy: Policy): Promise<void> {
+  const text = await readFile(RESTORING, 'utf8').catch(() => '')
+  if (!text) return
+  const m = JSON.parse(text) as RestoreMarker
+  const session: OpenSession = { dir: join(ROOT, 'sessions', m.session), meta: JSON.parse(await readFile(join(ROOT, 'sessions', m.session, 'session.json'), 'utf8')) }
+  await restoreTo(session, snapshotting(policy), m.target, m.snapshot)
+  console.error(`envgit: finished an interrupted rewind to ${m.target === 'base' ? 'base' : `step ${m.target}`}`)
 }
 
 async function log(): Promise<number> {
@@ -186,10 +217,15 @@ async function rewind(args: string[]): Promise<number> {
   const targetId = await snapshotOf(session, target)
   if (!targetId) throw new Error(`step ${target} has no snapshot`)
 
+  const busy = await busyHolder(ROOT)
+  if (busy !== undefined) {
+    console.error(`envgit: a step is running here (pid ${busy}); wait for it to finish`)
+    return 1
+  }
   const head = await readHead(session.dir)
   const headId = await snapshotOf(session, head)
   if (headId && !force) {
-    const now = await snap.store.snapshot(snap.workdir, snap.exclude, await snap.store.read(headId))
+    const now = await snap.store.snapshot(snap.workdir, snap.exclude, await snap.store.read(headId), { persist: false })
     if (now !== headId) {
       console.error(`envgit: the workdir has changes made outside envgit since step ${head}; rewind --force discards them`)
       return 1
@@ -202,8 +238,7 @@ async function rewind(args: string[]): Promise<number> {
   for (const s of undone.filter(s => s.irreversible)) {
     console.error(red(`envgit: step ${s.index} cannot be undone (${s.irreversible!.reason}): ${s.action.input}`))
   }
-  await snap.store.restore(snap.workdir, targetId, snap.exclude)
-  await writeHead(session.dir, target)
+  await restoreTo(session, snap, target, targetId)
   console.error(`envgit: rewound to ${target === 'base' ? 'base' : `step ${target}`} (${undone.length} step(s) undone); restart envgit mcp if it is running`)
   return 0
 }
@@ -234,6 +269,29 @@ async function fork(args: string[]): Promise<number> {
   return 0
 }
 
+async function sessionCmd(args: string[]): Promise<number> {
+  const policy = await requireInit()
+  if (args[0] === 'new') {
+    const session = await createSession(ROOT, 'srt')
+    await ensureBase(session, snapshotting(policy))
+    console.log(session.meta.id)
+    return 0
+  }
+  if (args.length) throw new Error('usage: envgit session [new]')
+  const current = await readFile(join(ROOT, 'current'), 'utf8').catch(() => '')
+  console.log(current.trim() || 'no session yet')
+  return 0
+}
+
+async function gc(): Promise<number> {
+  await requireInit()
+  const live = await liveSnapshots(ROOT)
+  const r = await new SnapshotStore(ROOT).gc(live)
+  // Logical size: with APFS clones the disk space actually freed can be smaller.
+  console.log(`removed ${r.snapshots} snapshot(s), ${r.blobs} blob(s), ${(r.bytes / 1e6).toFixed(1)} MB; kept ${live.size} snapshot(s) in use`)
+  return 0
+}
+
 let code: number
 try {
   switch (cmd) {
@@ -251,6 +309,12 @@ try {
       break
     case 'fork':
       code = await fork(args)
+      break
+    case 'session':
+      code = await sessionCmd(args)
+      break
+    case 'gc':
+      code = await gc()
       break
     case 'mcp':
       if (args[0] === '--worker') {

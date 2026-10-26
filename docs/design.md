@@ -91,16 +91,25 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 - Content-addressed: blobs at `.envgit/objects/<sha256>` (APFS clones where available), one manifest per
   snapshot at `.envgit/snapshots/<id>.json`. The id hashes paths, kinds, modes, file hashes and link
   targets — not mtimes — so an unchanged tree always gets the same id.
-- Incremental: a file whose size, mtime and mode match the previous manifest is not re-read.
+- Incremental: a file whose size, mtime and mode match the previous manifest is not re-read, unless its
+  mtime is within 2 s of that snapshot (git's "racy" case: it could have changed again unnoticed).
+- Only dirs, regular files and symlinks are tracked; FIFOs, sockets and devices are neither snapshotted
+  nor removed by a restore.
 - Each session has a **base** snapshot (before its first step) and a **head**. A step's `parent` is the
   head when it ran; `rewind N` restores N's snapshot and moves head, leaving the abandoned steps in the
-  log. `fork N <dir>` restores into a new directory with its own `.envgit` and `forkedFrom`.
+  log. `fork N <dir>` restores into a new directory (outside the workdir) with its own `.envgit` and
+  `forkedFrom`. `session new` starts a fresh session; old ones stay for audit.
 - `rewind` refuses when the workdir differs from head's snapshot (edits made outside envgit) unless
-  `--force`, and prints every irreversible step it steps back over.
+  `--force`, refuses while `.envgit/busy` names a live process (a step is running), and prints every
+  irreversible step it steps back over. It writes `.envgit/restoring` first; any later command that
+  finds the marker finishes the restore (restores only touch what differs, so redoing one is safe).
+- `envgit mcp` checks head before each `execute`; if a rewind moved it, the worker is restarted and the
+  result starts with a notice that REPL variables were reset.
+- `gc` keeps every snapshot any session refers to (abandoned branches included) and anything written in
+  the last hour (blobs land before their manifest, so a snapshot in progress elsewhere is not cut).
 - `.envgit` is always excluded from snapshots and always in srt's `denyWrite`, so the sandbox cannot
   rewrite its own history. `snapshot.exclude` in the policy leaves more paths out.
-- Limits: files only, no memory or processes (a running `envgit mcp` keeps its REPL variables across a
-  rewind — restart it); restore is not atomic; no GC of unreferenced objects yet.
+- Limits: files only, no memory or processes — that needs the VM tier; `fork` itself is not resumable.
 
 ## 4. Irreversibility
 

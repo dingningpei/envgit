@@ -1,11 +1,13 @@
 /** Parent side of the REPL: owns the sandboxed worker, the policy and the action log. */
 import type { ChildProcess } from 'node:child_process'
+import { access } from 'node:fs/promises'
+import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
 import type { Effect, Env } from '../core/env/backend.js'
 import { toEffect, type SrtBackend } from '../core/env/srt.js'
 import type { Policy } from '../core/policy/schema.js'
-import { ensureBase, recordStep, type OpenSession, type Snapshotting } from '../core/snapshot/log.js'
+import { acquireBusy, ensureBase, readHead, recordStep, releaseBusy, type OpenSession, type Snapshotting, type StepRef } from '../core/snapshot/log.js'
 import { CAPABILITIES_ENV, type WorkerMessage, type WorkerRequest } from './worker.js'
 
 export interface ReplResult {
@@ -30,6 +32,8 @@ export class ReplSession {
   private nextId = 0
   private claimed = new WeakSet<SandboxViolationEvent>()
   private queue: Promise<unknown> = Promise.resolve()
+  /** Head after this session's last step; a different head on disk means someone rewound. */
+  private lastHead?: StepRef
 
   constructor(
     private readonly backend: SrtBackend,
@@ -56,6 +60,27 @@ export class ReplSession {
   }
 
   private async run(code: string): Promise<ReplResult> {
+    await acquireBusy(this.snap.store.root)
+    try {
+      // A half-finished rewind must be completed (by the CLI) before a step runs on that tree.
+      if (await access(join(this.snap.store.root, 'restoring')).then(() => true, () => false)) {
+        throw new Error('a rewind was interrupted here; run any envgit command (e.g. envgit log) to finish it')
+      }
+      const head = await readHead(this.session.dir)
+      let notice: string | undefined
+      if (this.lastHead !== undefined && head !== this.lastHead) {
+        await this.close()
+        notice = `[envgit] the workdir was rewound to ${head === 'base' ? 'base' : `step ${head}`}; REPL variables were reset\n`
+      }
+      const r = await this.step(code)
+      this.lastHead = r.step
+      return notice ? { ...r, output: notice + r.output } : r
+    } finally {
+      await releaseBusy(this.snap.store.root)
+    }
+  }
+
+  private async step(code: string): Promise<ReplResult> {
     await ensureBase(this.session, this.snap)
     const startedAt = new Date().toISOString()
     const worker = await this.ensureWorker()
