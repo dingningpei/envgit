@@ -67,6 +67,8 @@ irreversible:
     const step = (await steps()).at(-1)
     expect(step.irreversible).toBeUndefined()
     expect(step.effects).toContainEqual(expect.objectContaining({ kind: 'net', method: 'POST', path: '/deploy', denied: true, irreversible: expect.objectContaining({ decision: 'denied' }) }))
+    // Once, as the gate's effect — not again as srt's copy of the same denial.
+    expect(step.effects.filter((e: { kind: string; reason?: string }) => e.kind === 'policy' && /http-request/.test(e.reason ?? ''))).toEqual([])
   }, 30_000)
 
   it('asks at the terminal and lets it through on yes, marking the step', async () => {

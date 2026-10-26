@@ -14,6 +14,8 @@ export interface VmMsg {
   op?: string
   error?: string
   argv?: string[]
+  env?: string[]
+  now_ns?: number
   timeout_ms?: number
   exit?: number
   stdout?: string
@@ -34,6 +36,11 @@ export function vmDir(): string {
 /** Unix socket paths are limited to ~104 bytes, so they live in the cache, keyed by workdir. */
 export function vmSocket(workdir: string): string {
   return join(vmDir(), 'run', `${createHash('sha256').update(workdir).digest('hex').slice(0, 12)}.sock`)
+}
+
+/** Where envgit-vm sends L2's egress connections; envgit listens here only while a step runs. */
+export function vmProxySocket(workdir: string): string {
+  return vmSocket(workdir).replace(/\.sock$/, '.proxy.sock')
 }
 
 export class VmClient {
@@ -83,11 +90,12 @@ export interface VmPaths {
   state: string
   /** Shared into L1 over virtiofs; L1 writes every snapshot here before acknowledging it. */
   snaps: string
+  proxy: string
 }
 
 export function vmPaths(workdir: string): VmPaths {
   const state = join(workdir, '.envgit', 'vm')
-  return { build: join(vmDir(), 'build'), socket: vmSocket(workdir), state, snaps: join(state, 'snaps') }
+  return { build: join(vmDir(), 'build'), socket: vmSocket(workdir), state, snaps: join(state, 'snaps'), proxy: vmProxySocket(workdir) }
 }
 
 /**
@@ -108,7 +116,7 @@ export async function vmUp(workdir: string, opts: { cpus?: number; mem?: number;
   const log = await open(join(p.state, 'console.log'), 'w')
   const child = spawn(
     join(p.build, 'envgit-vm'),
-    ['--kernel', join(p.build, 'Image'), '--initrd', join(p.build, 'l1-initrd.cpio'), '--socket', p.socket, '--share', p.snaps,
+    ['--kernel', join(p.build, 'Image'), '--initrd', join(p.build, 'l1-initrd.cpio'), '--socket', p.socket, '--share', p.snaps, '--proxy-socket', p.proxy,
      '--cpus', String(opts.cpus ?? 4), '--mem', String(opts.mem ?? 4096), '--l2mem', String(opts.l2mem ?? 1024)],
     { detached: true, stdio: ['ignore', log.fd, log.fd] },
   )
@@ -398,11 +406,17 @@ export class VmBackend implements EnvBackend {
   }
 
   async exec(_env: Env, cmd: Command): Promise<ExecResult> {
-    const { msg } = await this.client.call({ op: 'exec', argv: cmd.argv })
+    const env = cmd.env && Object.entries(cmd.env).map(([k, v]) => `${k}=${v}`)
+    const { msg } = await this.client.call({ op: 'exec', argv: cmd.argv, now_ns: Date.now() * 1e6, ...(env && { env }) })
     if (msg.stdout) process.stdout.write(msg.stdout)
     if (msg.stderr) process.stderr.write(msg.stderr)
-    // L2 has no network and its writes stay inside the snapshot boundary, so there is nothing to record yet.
+    // Writes stay inside the snapshot boundary; network effects come from the host-side gate (vm-egress.ts).
     return { exitCode: msg.exit ?? 1, stdout: msg.stdout ?? '', stderr: msg.stderr ?? '', effects: [] }
+  }
+
+  /** Sets L2's CA bundle: its own roots plus `extraPem` (the host proxy's per-run CA, if any). */
+  async trust(extraPem: string): Promise<void> {
+    await this.client.call({ op: 'trust' }, Buffer.from(extraPem))
   }
 
   /** Starts a fresh L2 guest (empty /work) and returns its full base snapshot. */

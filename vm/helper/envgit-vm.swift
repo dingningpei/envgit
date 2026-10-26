@@ -1,10 +1,14 @@
 // envgit-vm: boots the L1 microVM (docs/design.md §3.6) and bridges a host unix socket to the
 // L1 supervisor on vsock port 1024 — one vsock connection per accepted socket connection.
 //
-//   envgit-vm --kernel Image --initrd l1-initrd.cpio --socket path --share dir [--cpus 4] [--mem 4096] [--l2mem 1024]
+//   envgit-vm --kernel Image --initrd l1-initrd.cpio --socket path --share dir --proxy-socket path
+//             [--cpus 4] [--mem 4096] [--l2mem 1024]
 //
 // `dir` (the workdir's .envgit/vm/snaps) is shared into L1 over virtiofs with tag "envgit"; L1 writes
-// every snapshot there. The L1 console goes to stdout. The process exits when the guest stops.
+// every snapshot there. Guest connections to vsock port 3128 (L2's egress, via L1) are joined to the
+// unix socket `--proxy-socket`, which envgit serves only while a step runs; when nothing is listening
+// the connection is refused and L1 answers the client with an envgit 503. The L1 console goes to
+// stdout. The process exits when the guest stops.
 import Foundation
 import Virtualization
 
@@ -17,8 +21,9 @@ let kernel = opts["--kernel"] ?? ""
 let initrd = opts["--initrd"] ?? ""
 let socketPath = opts["--socket"] ?? ""
 let sharePath = opts["--share"] ?? ""
-if kernel.isEmpty || initrd.isEmpty || socketPath.isEmpty || sharePath.isEmpty {
-  log("usage: envgit-vm --kernel K --initrd I --socket S --share DIR [--cpus N] [--mem MiB] [--l2mem MiB]")
+let proxySocketPath = opts["--proxy-socket"] ?? ""
+if kernel.isEmpty || initrd.isEmpty || socketPath.isEmpty || sharePath.isEmpty || proxySocketPath.isEmpty {
+  log("usage: envgit-vm --kernel K --initrd I --socket S --share DIR --proxy-socket P [--cpus N] [--mem MiB] [--l2mem MiB]")
   exit(2)
 }
 
@@ -97,6 +102,47 @@ func bridge(client: Int32) {
   }
 }
 
+func unixAddr(_ path: String) -> sockaddr_un? {
+  var addr = sockaddr_un()
+  addr.sun_family = sa_family_t(AF_UNIX)
+  let bytes = Array(path.utf8)
+  guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return nil }
+  withUnsafeMutableBytes(of: &addr.sun_path) { p in
+    for (i, b) in bytes.enumerated() { p[i] = b }
+  }
+  return addr
+}
+
+func connectUnix(_ path: String) -> Int32? {
+  guard var addr = unixAddr(path) else { return nil }
+  let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+  let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+  let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, len) } }
+  if ok != 0 { close(fd); return nil }
+  return fd
+}
+
+// Guest-initiated egress connections on vsock port 3128.
+final class Egress: NSObject, VZVirtioSocketListenerDelegate {
+  func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection conn: VZVirtioSocketConnection, from device: VZVirtioSocketDevice) -> Bool {
+    guard let host = connectUnix(proxySocketPath) else { return false }
+    let guestFD = conn.fileDescriptor
+    let group = DispatchGroup()
+    for (a, b) in [(host, guestFD), (guestFD, host)] {
+      group.enter()
+      Thread.detachNewThread { pump(from: a, to: b); group.leave() }
+    }
+    group.notify(queue: .global()) {
+      conn.close()  // also keeps `conn` alive until both directions are done
+      close(host)
+    }
+    return true
+  }
+}
+let egress = Egress()
+let egressListener = VZVirtioSocketListener()
+egressListener.delegate = egress
+
 func serveSocket() {
   unlink(socketPath)
   let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -126,6 +172,7 @@ signal(SIGINT) { _ in vm.stop { _ in cleanup(); exit(0) } }
 vm.start { r in
   if case .failure(let e) = r { log("start failed: \(e)"); exit(1) }
   log("L1 started")
+  (vm.socketDevices.first as? VZVirtioSocketDevice)?.setSocketListener(egressListener, forPort: 3128)
   serveSocket()
 }
 RunLoop.main.run()

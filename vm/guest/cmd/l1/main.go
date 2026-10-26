@@ -6,6 +6,9 @@
 // parent chain and loads it in a fresh Firecracker process. Every snapshot is written to the host
 // share before it is acknowledged, so the host keeps them across L1 restarts; this VM's tmpfs holds
 // only the base memory of the current chain (as a cache) and whatever is in flight.
+//
+// Egress: L2's proxy connections to the host arrive on Firecracker's vsock UDS for port 3128 and are
+// passed on, one vsock connection each, to the host (envgit-vm), which hands them to envgit.
 package main
 
 import (
@@ -30,6 +33,7 @@ import (
 	"time"
 
 	"envgit/vm/guest/proto"
+	"envgit/vm/guest/splice"
 	"envgit/vm/guest/vsock"
 
 	"golang.org/x/sys/unix"
@@ -41,6 +45,7 @@ const (
 	vsockUDS  = "/tmp/v.sock"
 	snapDir   = "/tmp/snaps" // in flight, and the cached base memory
 	hostDir   = "/host"      // virtiofs share of <workdir>/.envgit/vm/snaps
+	proxyPort = 3128         // L2 → host egress tunnel, same number on every hop
 )
 
 func logf(f string, a ...any) { fmt.Printf("[l1] "+f+"\n", a...) }
@@ -77,6 +82,7 @@ func main() {
 		poweroff()
 	}
 	s := &supervisor{l2mem: cmdlineInt("envgit.l2mem", 1024)}
+	go egress()
 	ln, err := vsock.Listen(hostPort)
 	if err != nil {
 		logf("listen: %v", err)
@@ -619,7 +625,7 @@ func (s *supervisor) serve(c io.ReadWriteCloser) {
 			return
 		}
 		_ = proto.Write(c, proto.Msg{ID: base, Ms: ms(time.Since(t0))})
-	case "exec", "export", "import":
+	case "exec", "export", "import", "trust":
 		s.relay(c, m)
 	case "snapshot":
 		s.mu.Lock()
@@ -690,6 +696,34 @@ func (s *supervisor) relay(c io.ReadWriteCloser, m proto.Msg) {
 	}
 	if reply.Size > 0 {
 		_, _ = io.CopyN(c, a, reply.Size)
+	}
+}
+
+// egress forwards L2-initiated connections to the host. Firecracker turns a guest connect to
+// (CID 2, port P) into a connection on "<vsock uds>_P"; the listener outlives Firecracker restarts.
+func egress() {
+	path := fmt.Sprintf("%s_%d", vsockUDS, proxyPort)
+	_ = os.Remove(path)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		logf("egress listen: %v", err)
+		return
+	}
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		go func() {
+			up, err := vsock.Dial(unix.VMADDR_CID_HOST, proxyPort)
+			if err != nil {
+				// envgit-vm refuses while no envgit step is serving the proxy.
+				splice.Refuse(c)
+				return
+			}
+			splice.Join(c, up)
+		}()
 	}
 }
 

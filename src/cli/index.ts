@@ -4,6 +4,7 @@ import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
+import { startEgress, type Egress } from '../core/env/vm-egress.js'
 import { copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmSnapshotExists, vmUp, type MirrorResult } from '../core/env/vm.js'
 import { Gate, irreversibleOf } from '../core/policy/gate.js'
 import { ttyApprover } from './approve.js'
@@ -99,7 +100,7 @@ async function run(argv: string[]): Promise<number> {
     console.error(red(shell.refused))
     return 1
   }
-  if (policy.backend === 'vm') return runVm(argv, policy, shell.irreversible)
+  if (policy.backend === 'vm') return runVm(argv, policy, gate, shell.irreversible)
   const backend = new SrtBackend()
   const session = await openSession(ROOT, backend.name)
 
@@ -122,17 +123,21 @@ async function run(argv: string[]): Promise<number> {
       effects: result.effects,
       ...(irreversible && { irreversible: { reason: irreversible } }),
     })
-    for (const e of result.effects) {
-      if (e.kind === 'policy' && RELEVANT_DENIAL.test(e.reason)) console.error(red(`envgit: denied ${e.reason}`))
-      if (e.kind === 'net' && e.denied) console.error(red(`envgit: denied ${e.method} ${e.host}${e.path ?? ''}${e.irreversible ? ` (${e.irreversible.rule})` : ' (network.l7)'}`))
-      if (e.kind === 'net' && e.irreversible && !e.denied) console.error(red(`envgit: irreversible ${e.method} ${e.host}${e.path ?? ''} went out (${e.irreversible.rule}, ${e.irreversible.decision})`))
-    }
+    reportEffects(result.effects)
     console.error(`envgit: step ${step.index} recorded in session ${session.meta.id}`)
     return result.exitCode
   } finally {
     process.off('SIGINT', onSigint)
     await backend.destroy(env)
     await releaseBusy(ROOT)
+  }
+}
+
+function reportEffects(effects: Effect[]): void {
+  for (const e of effects) {
+    if (e.kind === 'policy' && RELEVANT_DENIAL.test(e.reason)) console.error(red(`envgit: denied ${e.reason}`))
+    if (e.kind === 'net' && e.denied) console.error(red(`envgit: denied ${e.method} ${e.host}${e.path ?? ''}${e.irreversible ? ` (${e.irreversible.rule})` : ' (network.l7)'}`))
+    if (e.kind === 'net' && e.irreversible && !e.denied) console.error(red(`envgit: irreversible ${e.method} ${e.host}${e.path ?? ''} went out (${e.irreversible.rule}, ${e.irreversible.decision})`))
   }
 }
 
@@ -417,26 +422,40 @@ async function vmSession(): Promise<OpenSession> {
   return session
 }
 
-/** L2 has no network, so only shell rules apply here (checked by the caller). */
-async function runVm(argv: string[], policy: Policy, irreversible?: string): Promise<number> {
+/**
+ * L2's only way out is the proxy tunnel, served for the length of this step when the policy allows
+ * any host: srt's proxy with the allowlist and the same gate as on srt. Shell rules were checked by the caller.
+ */
+async function runVm(argv: string[], policy: Policy, gate: Gate, shellIrreversible?: string): Promise<number> {
   const session = await vmSession()
   const vm = new VmBackend()
   const env = await vm.create({ workdir: process.cwd() })
   await acquireBusy(ROOT)
+  let egress: Egress | undefined
   try {
-    const startedAt = new Date().toISOString()
-    const result = await vm.exec(env, { argv })
+    const started = new Date()
+    if (policy.network?.allow?.length) {
+      egress = await startEgress(process.cwd(), policy, gate)
+      await vm.trust(egress.ca)
+    }
+    const result = await vm.exec(env, { argv, env: egress?.env })
+    const effects = [...result.effects, ...gate.drain(), ...(egress?.denials(started) ?? [])]
+    await egress?.stop()
+    egress = undefined
+    reportEffects(effects)
+    const irreversible = shellIrreversible ?? irreversibleOf(effects)
     const { step, mirror: m } = await recordVmStep(session, policy, vm, {
-      startedAt,
+      startedAt: started.toISOString(),
       endedAt: new Date().toISOString(),
       action: { type: 'exec', input: JSON.stringify(argv) },
       exitCode: result.exitCode,
-      effects: result.effects,
+      effects,
       ...(irreversible && { irreversible: { reason: irreversible } }),
     })
     console.error(`envgit: step ${step.index} recorded in vm session ${session.meta.id}${m.written || m.removed ? ` (mirror: ${m.written} written, ${m.removed} removed)` : ''}`)
     return result.exitCode
   } finally {
+    await egress?.stop()
     await releaseBusy(ROOT)
   }
 }

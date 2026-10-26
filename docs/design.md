@@ -167,6 +167,18 @@ sparse version, rebuilt from the packed copy);
   `vm up` work after `vm down`, `fork` clones the chain (APFS `clonefile`) into the new workdir and
   boots once there to fill its mirror, and `envgit gc` deletes snapshots no step builds on (the
   closure over `parent`, so a live diff keeps its ancestors).
+- **Egress:** L2 has no network device, only loopback. Its agent runs an HTTP proxy port on
+  `127.0.0.1:3128` that tunnels each connection over vsock — L2 → Firecracker's UDS on L1 → L1 → VZ
+  vsock 3128 → envgit-vm → a unix socket envgit serves. During `envgit run` envgit starts srt's proxy
+  there with the policy's allowlist and the same gate as on srt (§4), so `network.l7`, irreversible
+  rules, prompts and the step's `net` effects all behave identically; commands in L2 get
+  `HTTP(S)_PROXY` with that run's token and a CA bundle (`/etc/envgit/ca.pem`: the rootfs roots plus
+  the per-run CA when TLS is terminated). Between steps nothing listens: a background process that
+  tries to reach out gets an HTTP 503 whose body starts with `envgit:` (plain HTTP; for `https://` the
+  client only reports a 503 to its CONNECT), and its token is dead by the next step. Starting and
+  stopping the proxy adds ≈ 0.15 s to a step when the policy allows any host. Only proxy-aware clients get out — raw sockets and DNS have no route — which is the
+  egress property, not a gap. Every exec also carries the host's wall clock, because a restored
+  guest's clock is wherever its snapshot left it (TLS checks fail otherwise).
 - **Protocol:** one framed protocol on both hops — a 4-byte length + JSON header, optionally followed
   by a byte stream (files, tar).
 - **Not portable:** Firecracker snapshots do not load on a different CPU model, so a snapshot taken on
@@ -182,8 +194,7 @@ sparse version, rebuilt from the packed copy);
   3.5× native after a snapshot and 1.6× warm. Writing files in `/work` runs at ≈ 40–80 MB/s. So
   steps that touch a lot of memory pay for it; options are fewer snapshots for such steps, or
   Firecracker's mincore-based diffs without dirty tracking (bigger diffs, no write traps).
-- **Not yet:** L2 networking (M3, egress via a user-space stack like Claude's gVisor netstack), a full
-  rootfs with git/node (Claude's read-only root + overlay is the template) and with it `envgit mcp`
+- **Not yet:** a full rootfs with git/node (Claude's read-only root + overlay is the template) and with it `envgit mcp`
   on this backend (the REPL worker needs node in L2), net effects in the step log, and a cap on the
   disk the snapshots take besides `envgit gc`.
 
@@ -220,7 +231,8 @@ normalized path (ambiguous spellings like `/a/../b` are refused). Checked with c
   see the command line envgit was given, so `sh -c 'git push'` gets past them — the net rule is the
   enforcement, the shell rule is an early, readable stop.
 - `network.noInspect` lists hosts left as opaque tunnels (certificate pinning, mTLS); request rules
-  cannot see their HTTPS traffic. The vm backend has no network in L2 yet, so only shell rules apply there.
+  cannot see their HTTPS traffic. On the vm backend the same proxy and gate serve L2 through a vsock
+  tunnel (§3.6), during a step only.
 
 ## 5. Milestones
 

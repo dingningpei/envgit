@@ -2,7 +2,11 @@
 //
 // Mounts the read-only CI rootfs under a tmpfs overlay, so every write — including /work, the
 // workdir — lives in guest memory and is captured by Firecracker's memory snapshots. Serves exec,
-// export and import on vsock port 1024, and reaps every orphan as PID 1.
+// export, import and trust on vsock port 1024, and reaps every orphan as PID 1.
+//
+// Egress: there is no network device, only loopback. An HTTP proxy listens on 127.0.0.1:3128 and
+// tunnels each connection over vsock to the host (via L1), where envgit runs srt's proxy and the
+// irreversible-action gate — but only while a step is running.
 package main
 
 import (
@@ -13,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,14 +26,19 @@ import (
 	"time"
 
 	"envgit/vm/guest/proto"
+	"envgit/vm/guest/splice"
 	"envgit/vm/guest/vsock"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
-	port    = 1024
-	root    = "/newroot"
-	workdir = "/work"
-	maxOut  = 1 << 20
+	port      = 1024
+	proxyPort = 3128 // loopback TCP in here, and the vsock port towards the host
+	root      = "/newroot"
+	workdir   = "/work"
+	maxOut    = 1 << 20
+	caBundle  = "/etc/envgit/ca.pem" // inside root
 )
 
 func logf(f string, a ...any) { fmt.Printf("[agent] "+f+"\n", a...) }
@@ -38,6 +48,7 @@ func main() {
 		logf("setup failed: %v", err)
 	}
 	go reap()
+	go proxy()
 	ln, err := vsock.Listen(port)
 	if err != nil {
 		logf("listen: %v", err)
@@ -156,12 +167,19 @@ func execute(m proto.Msg) proto.Msg {
 	if len(m.Argv) == 0 {
 		return proto.Msg{Error: "empty argv"}
 	}
+	if m.NowNs > 0 {
+		// TLS certificate checks, make and anything else that reads the time need the real one.
+		tv := unix.NsecToTimeval(m.NowNs)
+		if err := unix.Settimeofday(&tv); err != nil {
+			logf("settimeofday: %v", err)
+		}
+	}
 	outR, outW, _ := os.Pipe()
 	errR, errW, _ := os.Pipe()
 	devnull, _ := os.Open("/dev/null")
 	attr := &syscall.ProcAttr{
 		Dir:   workdir,
-		Env:   []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "TERM=dumb", "LANG=C.UTF-8"},
+		Env:   mergeEnv([]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "TERM=dumb", "LANG=C.UTF-8"}, m.Env),
 		Files: []uintptr{devnull.Fd(), outW.Fd(), errW.Fd()},
 		Sys:   &syscall.SysProcAttr{Chroot: root, Setpgid: true},
 	}
@@ -209,6 +227,24 @@ func execute(m proto.Msg) proto.Msg {
 		exit = 128 + int(ws.Signal())
 	}
 	return proto.Msg{Exit: exit, Stdout: stdout.String(), Stderr: stderr.String()}
+}
+
+// mergeEnv returns base with every KEY=VALUE of over replacing or adding to it.
+func mergeEnv(base, over []string) []string {
+	out := append([]string{}, base...)
+	for _, kv := range over {
+		k, _, _ := strings.Cut(kv, "=")
+		replaced := false
+		for i, b := range out {
+			if bk, _, _ := strings.Cut(b, "="); bk == k {
+				out[i], replaced = kv, true
+			}
+		}
+		if !replaced {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 func lookPath(name string) string {
@@ -264,19 +300,23 @@ func exportTar(known map[string]string) ([]byte, error) {
 			return err
 		}
 		hdr.Name = rel
+		var data []byte
+		if info.Mode().IsRegular() {
+			// Read first and size the entry by what was read: a background process may be rewriting
+			// the file right now, and a header from the earlier stat would not match the bytes.
+			if data, err = os.ReadFile(path); err != nil {
+				if os.IsNotExist(err) {
+					return nil // deleted since the walk saw it
+				}
+				return err
+			}
+			hdr.Size = int64(len(data))
+		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
-		if info.Mode().IsRegular() {
-			f, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(tw, f)
-			f.Close()
-			return err
-		}
-		return nil
+		_, err = tw.Write(data)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -338,6 +378,67 @@ func importTar(r io.Reader) error {
 	}
 }
 
+func writeTrust(extra io.Reader) error {
+	roots, err := os.ReadFile(root + "/etc/ssl/certs/ca-certificates.crt")
+	if err != nil {
+		return err
+	}
+	add, err := io.ReadAll(extra)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(root+caBundle), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(root+caBundle, append(append(roots, '\n'), add...), 0o644)
+}
+
+// ---- egress: loopback proxy port tunnelled to the host ----
+
+func proxy() {
+	if err := loopbackUp(); err != nil {
+		logf("loopback: %v", err)
+		return
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", proxyPort))
+	if err != nil {
+		logf("proxy listen: %v", err)
+		return
+	}
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		go func() {
+			up, err := vsock.Dial(unix.VMADDR_CID_HOST, proxyPort)
+			if err != nil {
+				splice.Refuse(c)
+				return
+			}
+			splice.Join(c, up)
+		}()
+	}
+}
+
+func loopbackUp() error {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	ifr, err := unix.NewIfreq("lo")
+	if err != nil {
+		return err
+	}
+	if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, ifr); err != nil {
+		return err
+	}
+	ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
+	return unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr)
+}
+
 func serve(c io.ReadWriteCloser) {
 	defer c.Close()
 	m, err := proto.Read(c)
@@ -365,6 +466,14 @@ func serve(c io.ReadWriteCloser) {
 		if proto.Write(c, proto.Msg{Size: int64(len(b))}) == nil {
 			_, _ = c.Write(b)
 		}
+	case "trust":
+		// The CA bundle commands use for TLS: the rootfs's own roots plus, when the host terminates
+		// TLS, its per-run CA (the body).
+		if err := writeTrust(io.LimitReader(c, m.Size)); err != nil {
+			proto.Fail(c, err)
+			return
+		}
+		_ = proto.Write(c, proto.Msg{Op: "trusted"})
 	case "import":
 		if err := importTar(io.LimitReader(c, m.Size)); err != nil {
 			proto.Fail(c, err)

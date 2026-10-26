@@ -66,7 +66,7 @@ export class SrtBackend implements EnvBackend {
 
   /** Only denials are observable here; allowed connections and fs access are not surfaced by srt. */
   violations(commandId: string): SandboxViolationEvent[] {
-    return SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
+    return SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId).filter(notGated)
   }
 
   /**
@@ -96,6 +96,11 @@ export class SrtBackend implements EnvBackend {
     this.env = undefined
     await SandboxManager.reset()
   }
+}
+
+/** srt also logs the gate's own denials; the gate already recorded them as `net` effects. */
+export function notGated(v: SandboxViolationEvent): boolean {
+  return !/^deny http-request \S+ \S+ \(envgit: /.test(v.line)
 }
 
 export function toEffect(v: SandboxViolationEvent): Effect {

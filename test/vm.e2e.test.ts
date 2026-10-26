@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -112,4 +114,41 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1')('vm backend (e2e, ENVGIT_VM_E
       await sub('vm', 'down')
     }
   }, 180_000)
+
+  it('reaches the network only through the host proxy and gate, and only during a step', async () => {
+    const hits: string[] = []
+    const server = http.createServer((q, r) => (hits.push(`${q.method} ${q.url}`), r.end('from host')))
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const policy = await readFile(join(dir, '.envgit/policy.yaml'), 'utf8')
+    await writeFile(
+      join(dir, '.envgit/policy.yaml'),
+      `backend: vm
+network:
+  allow: ["127.0.0.1"]
+  l7:
+    "127.0.0.1": { paths: ["/ok", "/deploy", "/bg"] }
+irreversible:
+  - net: { host: "127.0.0.1", method: POST, path: "/deploy" }
+`,
+    )
+    // In L2, loopback is L2's own; --noproxy '' sends a host-loopback URL through the proxy.
+    const curl = (...a: string[]) => envgit('run', 'curl', '-s', '--noproxy', '', ...a)
+    try {
+      expect((await curl(`${base}/ok`)).stdout).toBe('from host')
+      const deploy = await curl('-X', 'POST', `${base}/deploy`)
+      expect(deploy.stdout).toMatch(/^envgit: POST 127\.0\.0\.1\/deploy is irreversible .*needs approval/)
+      expect(deploy.stderr).toMatch(/denied POST 127\.0\.0\.1\/deploy/)
+      expect((await curl(`${base}/admin`)).stdout).toMatch(/not allowed by network.l7/)
+      expect(hits).toEqual(['GET /ok'])
+
+      await envgit('run', 'sh', '-c', `(sleep 2; curl -s --noproxy '' ${base}/bg > bg.txt 2>&1) >/dev/null 2>&1 &`)
+      await sleep(3500)
+      expect((await envgit('run', 'cat', 'bg.txt')).stdout).toMatch(/^envgit: the sandbox has network access only while a step runs/)
+      expect(hits).not.toContain('GET /bg')
+    } finally {
+      await writeFile(join(dir, '.envgit/policy.yaml'), policy)
+      server.close()
+    }
+  }, 120_000)
 })

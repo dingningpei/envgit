@@ -1,4 +1,4 @@
-// Package vsock is a minimal AF_VSOCK listener; Go's net package does not accept vsock fds.
+// Package vsock is a minimal AF_VSOCK listener and dialer; Go's net package does not accept vsock fds.
 package vsock
 
 import (
@@ -37,4 +37,23 @@ func (l *Listener) Accept() (*os.File, error) {
 		}
 		return os.NewFile(uintptr(nfd), "vsock"), nil
 	}
+}
+
+// Dial connects to port on cid (VMADDR_CID_HOST, 2, is whoever runs this VM).
+func Dial(cid, port uint32) (*os.File, error) {
+	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err = unix.Connect(fd, &unix.SockaddrVM{CID: cid, Port: port})
+		if err != unix.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), "vsock"), nil
 }
