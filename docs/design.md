@@ -74,10 +74,11 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 
 ### 3.3 REPL (`src/repl`)
 
-- QuickJS or isolated-vm; persistent across steps (variables survive).
+- `node:vm` context in a long-lived worker process that runs under the env backend (srt in M1); the backend is the security boundary, `node:vm` only provides persistence. Persistent across steps (variables survive). The engine sits behind an `Engine` interface so QuickJS / isolated-vm can slot in where an in-process boundary is wanted.
 - Tools (MCP, CLI, HTTP) injected as typed async functions per `capabilities`.
 - Only `print()` / return value goes back to the model; everything else stays in the sandbox.
 - Each `execute` is one Step → one snapshot.
+- Effects for a REPL step are recorded by the injected capability wrappers (files read/written, hosts contacted, denials), since the macOS sandbox violation log drops events for long-lived processes; the backend's violation log is a best-effort supplement.
 - No shell-string API by default; typed command capabilities instead.
 
 ### 3.4 Adapters (`src/adapters`)

@@ -2,10 +2,13 @@
 import { access, copyFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { matchIrreversible } from '../core/policy/compile.js'
 import { loadPolicy } from '../core/policy/load.js'
 import { appendStep, nextStepIndex, openSession, type Step } from '../core/snapshot/log.js'
+import { ReplSession } from '../repl/session.js'
+import { runWorker } from '../repl/worker.js'
 
 const [cmd = 'help', ...args] = process.argv.slice(2)
 
@@ -13,6 +16,7 @@ const help = `envgit — version control for agent execution environments
 
   envgit init            create .envgit/ and a default policy
   envgit run <cmd...>    run a command in the sandbox, record a step
+  envgit mcp             serve the sandboxed REPL as an MCP server on stdio
   envgit log             show steps
   envgit fork <step>     fork the environment at a step
   envgit rewind <step>   rewind the environment to a step
@@ -73,12 +77,33 @@ async function run(argv: string[]): Promise<number> {
     }
     await appendStep(session.dir, step)
     for (const e of result.effects) {
-      if (e.kind === 'policy' && /\b(file-|network-)/.test(e.reason)) console.error(red(`envgit: denied ${e.reason}`))
+      if (e.kind === 'policy' && /\b(file|network)-\S+\s+\S/.test(e.reason)) console.error(red(`envgit: denied ${e.reason}`))
     }
     console.error(`envgit: step ${step.index} recorded in session ${session.meta.id}`)
     return result.exitCode
   } finally {
     process.off('SIGINT', onSigint)
+    await backend.destroy(env)
+  }
+}
+
+async function mcp(): Promise<number> {
+  // stdout carries JSON-RPC; keep every diagnostic on stderr.
+  console.log = console.error
+  if (!(await exists(POLICY))) {
+    console.error('envgit: no .envgit/policy.yaml here — run `envgit init` first')
+    return 1
+  }
+  const policy = await loadPolicy(POLICY)
+  const backend = new SrtBackend()
+  const session = await openSession(ROOT, backend.name)
+  const env = await backend.create({ workdir: process.cwd(), policy })
+  const repl = new ReplSession(backend, env, policy, session.dir)
+  try {
+    await serveMcp(repl, policy, process.cwd())
+    return 0
+  } finally {
+    await repl.close()
     await backend.destroy(env)
   }
 }
@@ -91,6 +116,14 @@ try {
       break
     case 'run':
       code = await run(args)
+      break
+    case 'mcp':
+      if (args[0] === '--worker') {
+        await runWorker()
+        code = 0
+      } else {
+        code = await mcp()
+      }
       break
     default:
       console.log(help)

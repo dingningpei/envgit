@@ -28,7 +28,7 @@ export interface ExecResult {
 }
 
 export type Effect =
-  | { kind: 'fs'; op: 'read' | 'write' | 'delete'; path: string }
+  | { kind: 'fs'; op: 'read' | 'write' | 'delete'; path: string; denied?: boolean }
   | { kind: 'net'; host: string; port: number; method?: string; path?: string; denied?: boolean }
   | { kind: 'proc'; argv: string[] }
   | { kind: 'policy'; denied: true; reason: string }

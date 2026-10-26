@@ -1,8 +1,8 @@
 /** srt backend: OS-primitive sandbox via @anthropic-ai/sandbox-runtime. See docs/design.md §3.1 */
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import os from 'node:os'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { SandboxManager } from '@anthropic-ai/sandbox-runtime'
+import { SandboxManager, type SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
 import { compileSrt } from '../policy/compile.js'
 import type { Command, Effect, Env, EnvBackend, EnvSpec, ExecResult, SnapshotId } from './backend.js'
 
@@ -35,7 +35,7 @@ export class SrtBackend implements EnvBackend {
     return Promise.reject(new Error('srt: snapshots are not supported'))
   }
 
-  async exec(env: Env, cmd: Command, signal?: AbortSignal): Promise<ExecResult> {
+  async spawn(env: Env, cmd: Command, stdio: StdioOptions, signal?: AbortSignal): Promise<{ child: ChildProcess; commandId: string }> {
     if (env !== this.env) throw new Error('srt: unknown env')
     const commandId = randomBytes(16).toString('base64url')
     const commandText = shellQuote(cmd.argv)
@@ -44,13 +44,22 @@ export class SrtBackend implements EnvBackend {
       commandId,
       commandText,
     })
+    const [file, ...args] = wrapped.argv
+    if (!file) throw new Error('srt: empty wrapped command')
+    const child = spawn(file, args, { cwd, env: { ...wrapped.env, ...cmd.env }, stdio })
+    return { child, commandId }
+  }
+
+  /** Only denials are observable here; allowed connections and fs access are not surfaced by srt. */
+  violations(commandId: string): SandboxViolationEvent[] {
+    return SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
+  }
+
+  async exec(env: Env, cmd: Command, signal?: AbortSignal): Promise<ExecResult> {
+    const { child, commandId } = await this.spawn(env, cmd, ['inherit', 'pipe', 'pipe'], signal)
     try {
-      const { exitCode, stdout, stderr } = await run(wrapped.argv, { ...wrapped.env, ...cmd.env }, cwd, signal)
-      // Only denials are observable here; allowed connections and fs access are not surfaced by srt.
-      const effects: Effect[] = SandboxManager.getSandboxViolationStore()
-        .getViolationsForCommand(commandId)
-        .map(v => ({ kind: 'policy', denied: true, reason: v.line }))
-      return { exitCode, stdout, stderr, effects }
+      const { exitCode, stdout, stderr } = await wait(child, signal)
+      return { exitCode, stdout, stderr, effects: this.violations(commandId).map(toEffect) }
     } finally {
       SandboxManager.cleanupAfterCommand()
     }
@@ -63,13 +72,14 @@ export class SrtBackend implements EnvBackend {
   }
 }
 
-function run(argv: string[], env: NodeJS.ProcessEnv, cwd: string, signal?: AbortSignal) {
+export function toEffect(v: SandboxViolationEvent): Effect {
+  return { kind: 'policy', denied: true, reason: v.line }
+}
+
+function wait(child: ChildProcess, signal?: AbortSignal) {
   return new Promise<{ exitCode: number; stdout: string; stderr: string }>((resolve, reject) => {
-    const [file, ...args] = argv
-    if (!file) return reject(new Error('srt: empty wrapped command'))
-    const child = spawn(file, args, { cwd, env, stdio: ['inherit', 'pipe', 'pipe'] })
-    const out = capture(child.stdout, process.stdout)
-    const err = capture(child.stderr, process.stderr)
+    const out = capture(child.stdout!, process.stdout)
+    const err = capture(child.stderr!, process.stderr)
     const onAbort = () => child.kill('SIGINT')
     signal?.addEventListener('abort', onAbort, { once: true })
     child.on('error', reject)
