@@ -132,9 +132,9 @@ export class SnapshotStore {
    * `graceMs` is kept: blobs are written before their manifest, so a snapshot in progress in another
    * process would otherwise lose them.
    */
-  async gc(live: Set<SnapshotId>, graceMs = 3600_000): Promise<{ snapshots: number; blobs: number; bytes: number }> {
+  async gc(live: Set<SnapshotId>, graceMs = 3600_000): Promise<{ snapshots: number; blobs: number; tmp: number; bytes: number }> {
     const cutoff = Date.now() - graceMs
-    const removed = { snapshots: 0, blobs: 0, bytes: 0 }
+    const removed = { snapshots: 0, blobs: 0, tmp: 0, bytes: 0 }
     const used = new Set<string>()
     for (const name of await readdir(this.manifests()).catch(() => [] as string[])) {
       const id = name.replace(/\.json$/, '') as SnapshotId
@@ -147,13 +147,15 @@ export class SnapshotStore {
       }
     }
     for (const name of await readdir(this.objects()).catch(() => [] as string[])) {
-      if (used.has(name) || name.endsWith('.tmp')) continue
+      if (used.has(name)) continue
       const path = join(this.objects(), name)
       const st = await lstat(path)
       // ctime, not mtime: a cloned blob keeps the source file's mtime.
       if (st.ctimeMs > cutoff) continue
       await rm(path, { force: true })
-      removed.blobs++
+      // `.tmp` files are blobs whose writer crashed before renaming them into place.
+      if (name.endsWith('.tmp')) removed.tmp++
+      else removed.blobs++
       removed.bytes += st.size
     }
     return removed

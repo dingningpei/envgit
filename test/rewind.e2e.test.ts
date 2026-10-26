@@ -53,6 +53,26 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect(stdout).toMatch(/forked from \S+ step 1/)
   }, 30_000)
 
+  it('restarts a fork that a crash left half-built', async () => {
+    const target = join(dir, '..', `${dir.split('/').pop()}-fork2`)
+    await mkdir(join(`${target}.forking`, '.envgit/junk'), { recursive: true })
+    await writeFile(join(`${target}.forking`, '.envgit/junk/leftover'), 'x')
+    await envgit(dir, 'fork', '1', target)
+    expect(await readFile(join(target, 'f'), 'utf8')).toBe('b')
+    await expect(readFile(join(target, '.envgit/junk/leftover'))).rejects.toThrow()
+    await expect(readFile(join(`${target}.forking`, '.envgit/junk/leftover'))).rejects.toThrow()
+  }, 30_000)
+
+  it('leaves an unrelated <dir>.forking alone', async () => {
+    const target = join(dir, '..', `${dir.split('/').pop()}-fork3`)
+    await mkdir(`${target}.forking`)
+    await writeFile(join(`${target}.forking`, 'other'), 'mine')
+    const r = await envgit(dir, 'fork', '1', target)
+    expect(r.code).toBe(1)
+    expect(r.stderr).toMatch(/is not a leftover fork/)
+    expect(await readFile(join(`${target}.forking`, 'other'), 'utf8')).toBe('mine')
+  }, 30_000)
+
   it('refuses to fork into the workdir itself', async () => {
     const r = await envgit(dir, 'fork', '1', 'nested')
     expect(r.code).toBe(1)

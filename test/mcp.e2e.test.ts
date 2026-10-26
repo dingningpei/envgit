@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -76,6 +76,17 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect(last.exitCode).toBe(1)
     expect(last.effects).toContainEqual({ kind: 'fs', op: 'read', path: ssh, denied: true })
     expect(log.slice(0, -1).every(s => !s.effects.some(e => e.kind === 'fs' && e.path === ssh))).toBe(true)
+  }, 30_000)
+
+  it('refuses a concurrent envgit run while a step is executing', async () => {
+    const pending = execute('await new Promise(r => setTimeout(r, 3000)); "done"')
+    for (let i = 0; i < 40 && !(await access(join(dir, '.envgit/busy')).then(() => true, () => false)); i++) {
+      await new Promise(r => setTimeout(r, 50))
+    }
+    const r = await promisify(execFile)(process.execPath, [CLI, 'run', 'true'], { cwd: dir }).catch((e: { code: number; stderr: string }) => e)
+    expect('code' in r && r.code).toBe(1)
+    expect(r.stderr).toMatch(/another envgit process \(pid \d+\) is running a step here/)
+    expect((await pending).text).toMatch(/done/)
   }, 30_000)
 
   it('resets the REPL and says so after a rewind', async () => {

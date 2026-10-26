@@ -1,6 +1,6 @@
 /** Append-only action log. See docs/design.md §2 */
 import { randomBytes } from 'node:crypto'
-import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Effect, SnapshotId } from '../env/backend.js'
 import type { SnapshotStore } from './store.js'
@@ -64,31 +64,7 @@ export async function liveSnapshots(root: string): Promise<Set<SnapshotId>> {
   return live
 }
 
-/**
- * `.envgit/busy` holds the pid of a process between running a step and recording it, so a rewind
- * cannot restore files underneath a step that is still writing them.
- */
-export async function acquireBusy(root: string): Promise<void> {
-  const holder = await busyHolder(root)
-  if (holder !== undefined && holder !== process.pid) throw new Error(`another envgit process (pid ${holder}) is running a step here`)
-  await writeFile(join(root, 'busy'), `${process.pid}\n`)
-}
-
-export async function releaseBusy(root: string): Promise<void> {
-  if ((await busyHolder(root)) === process.pid) await rm(join(root, 'busy'), { force: true })
-}
-
-/** The live pid holding the busy lock, if any. A stale lock (dead pid) counts as free. */
-export async function busyHolder(root: string): Promise<number | undefined> {
-  const pid = Number(await readFile(join(root, 'busy'), 'utf8').catch(() => ''))
-  if (!pid) return undefined
-  try {
-    process.kill(pid, 0)
-    return pid
-  } catch {
-    return undefined
-  }
-}
+export { acquireBusy, busyHolder, releaseBusy } from './lock.js'
 
 export async function readSteps(sessionDir: string): Promise<Step[]> {
   const text = await readFile(join(sessionDir, 'steps.jsonl'), 'utf8').catch((e: NodeJS.ErrnoException) => {

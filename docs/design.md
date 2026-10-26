@@ -98,18 +98,24 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 - Each session has a **base** snapshot (before its first step) and a **head**. A step's `parent` is the
   head when it ran; `rewind N` restores N's snapshot and moves head, leaving the abandoned steps in the
   log. `fork N <dir>` restores into a new directory (outside the workdir) with its own `.envgit` and
-  `forkedFrom`. `session new` starts a fresh session; old ones stay for audit.
+  `forkedFrom`; it is built in `<dir>.forking` and renamed into place, so a crashed fork leaves no
+  half-built target and a retry clears the leftover. `session new` starts a fresh session; old ones
+  stay for audit.
 - `rewind` refuses when the workdir differs from head's snapshot (edits made outside envgit) unless
   `--force`, refuses while `.envgit/busy` names a live process (a step is running), and prints every
   irreversible step it steps back over. It writes `.envgit/restoring` first; any later command that
   finds the marker finishes the restore (restores only touch what differs, so redoing one is safe).
 - `envgit mcp` checks head before each `execute`; if a rewind moved it, the worker is restarted and the
   result starts with a notice that REPL variables were reset.
+- `.envgit/busy` is `{pid, started}` (`ps -o lstart`), created with `O_EXCL`. A holder counts as alive
+  only if the pid exists and its start time matches, so a reused pid does not keep the lock; a stale
+  lock is moved aside atomically and dropped only if it is still the record judged stale.
 - `gc` keeps every snapshot any session refers to (abandoned branches included) and anything written in
-  the last hour (blobs land before their manifest, so a snapshot in progress elsewhere is not cut).
+  the last hour (blobs land before their manifest, so a snapshot in progress elsewhere is not cut);
+  `.tmp` blobs left by a crashed write are swept after the same grace.
 - `.envgit` is always excluded from snapshots and always in srt's `denyWrite`, so the sandbox cannot
   rewrite its own history. `snapshot.exclude` in the policy leaves more paths out.
-- Limits: files only, no memory or processes — that needs the VM tier; `fork` itself is not resumable.
+- Limits: files only, no memory or processes — that needs the VM tier.
 
 ## 4. Irreversibility
 

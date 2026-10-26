@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { access, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { serveMcp } from '../adapters/mcp/server.js'
@@ -255,16 +255,25 @@ async function fork(args: string[]): Promise<number> {
   const id = await snapshotOf(session, target)
   if (!id) throw new Error(`step ${target} has no snapshot`)
 
-  const root = join(dir, '.envgit')
+  // Built next to the target and renamed into place, so a fork is all or nothing. The temp name is
+  // fixed, so a retry after a crash clears what the failed attempt left.
+  const tmp = `${dir}.forking`
+  if (await exists(tmp)) {
+    // Only clear what a previous fork left: it creates `.envgit` first.
+    if (!(await exists(join(tmp, '.envgit')))) throw new Error(`${tmp} exists and is not a leftover fork; remove it or choose another target`)
+    await rm(tmp, { recursive: true, force: true })
+  }
+  const root = join(tmp, '.envgit')
   await mkdir(join(root, 'sessions'), { recursive: true })
   await copyFile(POLICY, join(root, 'policy.yaml'))
   const store = new SnapshotStore(root)
   await snapshotting(policy).store.copyTo(store, id)
-  await store.restore(dir, id, policy.snapshot?.exclude ?? [])
+  await store.restore(tmp, id, policy.snapshot?.exclude ?? [])
   const forked = await openSession(root, 'srt')
   forked.meta.base = id
   forked.meta.forkedFrom = { session: session.meta.id, step: target, snapshot: id }
   await writeMeta(forked)
+  await rename(tmp, dir)
   console.error(`envgit: forked ${target === 'base' ? 'base' : `step ${target}`} into ${dir} (session ${forked.meta.id})`)
   return 0
 }
@@ -288,7 +297,7 @@ async function gc(): Promise<number> {
   const live = await liveSnapshots(ROOT)
   const r = await new SnapshotStore(ROOT).gc(live)
   // Logical size: with APFS clones the disk space actually freed can be smaller.
-  console.log(`removed ${r.snapshots} snapshot(s), ${r.blobs} blob(s), ${(r.bytes / 1e6).toFixed(1)} MB; kept ${live.size} snapshot(s) in use`)
+  console.log(`removed ${r.snapshots} snapshot(s), ${r.blobs} blob(s), ${r.tmp} leftover temp file(s), ${(r.bytes / 1e6).toFixed(1)} MB; kept ${live.size} snapshot(s) in use`)
   return 0
 }
 

@@ -67,6 +67,6 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect(await store.has(orphan)).toBe(false)
     expect((await envgit('rewind', '0')).stderr).toMatch(/rewound to step 0/)
     expect(await readFile(join(dir, 'f'), 'utf8')).toBe('a\n')
-    expect((await envgit('gc')).stdout).toMatch(/removed 0 snapshot\(s\), 0 blob\(s\)/)
+    expect((await envgit('gc')).stdout).toMatch(/removed 0 snapshot\(s\), 0 blob\(s\), 0 leftover temp file\(s\)/)
   }, 30_000)
 })

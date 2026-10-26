@@ -103,6 +103,15 @@ describe('SnapshotStore', () => {
     expect(await store.snapshot(work)).toBe(id)
   })
 
+  it('sweeps leftover temp blobs once they are past the grace period', async () => {
+    await store.snapshot(work)
+    await writeFile(join(work, '.envgit/objects/deadbeef.123.tmp'), 'partial')
+    expect((await store.gc(new Set(), 3600_000)).tmp).toBe(0)
+    await new Promise(r => setTimeout(r, 20))
+    expect((await store.gc(new Set(), 0)).tmp).toBe(1)
+    await expect(readFile(join(work, '.envgit/objects/deadbeef.123.tmp'))).rejects.toThrow()
+  })
+
   it('copies a snapshot into another store', async () => {
     const id = await store.snapshot(work)
     const other = await mkdtemp(join(tmpdir(), 'envgit-fork-'))
