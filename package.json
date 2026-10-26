@@ -12,7 +12,8 @@
     "dev": "tsx src/cli/index.ts",
     "pretest": "npm run build",
     "test": "vitest run",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "demo": "npm run build && node scripts/demo.mjs"
   },
   "engines": {
     "node": ">=22"

@@ -50,11 +50,12 @@ export function buildCapabilities(caps: Caps, workdir: string, onEffect: (e: Eff
     globals.fs = {
       readFile: (path: string) => fsOp('read', path, abs => readFile(abs, 'utf8')),
       writeFile: (path: string, data: string) => fsOp('write', path, abs => writeFile(abs, data)),
-      readdir: (path = '.') => fsOp('read', path, abs => readdir(abs)),
+      readdir: (path = '.') => fsOp('read', path, async abs => (await readdir(abs, { withFileTypes: true })).map(d => (d.isDirectory() ? `${d.name}/` : d.name))),
     }
     decls.push(`declare const fs: {
   readFile(path: string): Promise<string>
   writeFile(path: string, data: string): Promise<void>
+  /** Directory names end with '/'. */
   readdir(path?: string): Promise<string[]>
 }`)
   }

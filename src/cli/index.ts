@@ -16,7 +16,8 @@ const help = `envgit — version control for agent execution environments
 
   envgit init            create .envgit/ and a default policy
   envgit run <cmd...>    run a command in the sandbox, record a step
-  envgit mcp             serve the sandboxed REPL as an MCP server on stdio
+  envgit mcp [--tools]   serve the sandboxed REPL as an MCP server on stdio
+                         (--tools: one MCP tool per capability instead of execute)
   envgit log             show steps
   envgit fork <step>     fork the environment at a step
   envgit rewind <step>   rewind the environment to a step
@@ -87,7 +88,7 @@ async function run(argv: string[]): Promise<number> {
   }
 }
 
-async function mcp(): Promise<number> {
+async function mcp(mode: 'repl' | 'tools'): Promise<number> {
   // stdout carries JSON-RPC; keep every diagnostic on stderr.
   console.log = console.error
   if (!(await exists(POLICY))) {
@@ -100,7 +101,7 @@ async function mcp(): Promise<number> {
   const env = await backend.create({ workdir: process.cwd(), policy })
   const repl = new ReplSession(backend, env, policy, session.dir)
   try {
-    await serveMcp(repl, policy, process.cwd())
+    await serveMcp(repl, policy, process.cwd(), mode)
     return 0
   } finally {
     await repl.close()
@@ -122,7 +123,7 @@ try {
         await runWorker()
         code = 0
       } else {
-        code = await mcp()
+        code = await mcp(args[0] === '--tools' ? 'tools' : 'repl')
       }
       break
     default:

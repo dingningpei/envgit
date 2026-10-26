@@ -1,0 +1,80 @@
+[
+  {
+    "corpus": "src",
+    "arm": "tools",
+    "run": 1,
+    "requests": 5,
+    "toolCalls": 21,
+    "toolResultChars": 36058,
+    "firstRequestContext": 3731,
+    "contextTokens": 37034,
+    "outputTokens": 2678,
+    "costUsd": 0.2097196,
+    "correct": true
+  },
+  {
+    "corpus": "src",
+    "arm": "execute",
+    "run": 1,
+    "requests": 2,
+    "toolCalls": 1,
+    "toolResultChars": 37678,
+    "firstRequestContext": 3793,
+    "contextTokens": 23657,
+    "outputTokens": 1207,
+    "costUsd": 0.17413819999999997,
+    "correct": true
+  },
+  {
+    "corpus": "src",
+    "arm": "tools",
+    "run": 2,
+    "requests": 5,
+    "toolCalls": 21,
+    "toolResultChars": 36058,
+    "firstRequestContext": 3733,
+    "contextTokens": 37044,
+    "outputTokens": 2733,
+    "costUsd": 0.2108372,
+    "correct": true
+  },
+  {
+    "corpus": "src",
+    "arm": "execute",
+    "run": 2,
+    "requests": 2,
+    "toolCalls": 1,
+    "toolResultChars": 37083,
+    "firstRequestContext": 3791,
+    "contextTokens": 23267,
+    "outputTokens": 1152,
+    "costUsd": 0.1699338,
+    "correct": true
+  },
+  {
+    "corpus": "src",
+    "arm": "tools",
+    "run": 3,
+    "requests": 5,
+    "toolCalls": 21,
+    "toolResultChars": 36058,
+    "firstRequestContext": 3733,
+    "contextTokens": 37044,
+    "outputTokens": 2877,
+    "costUsd": 0.2137172,
+    "correct": true
+  },
+  {
+    "corpus": "src",
+    "arm": "execute",
+    "run": 3,
+    "requests": 2,
+    "toolCalls": 1,
+    "toolResultChars": 7202,
+    "firstRequestContext": 3791,
+    "contextTokens": 10999,
+    "outputTokens": 1304,
+    "costUsd": 0.0748298,
+    "correct": true
+  }
+]

@@ -5,3 +5,7 @@ coverage/
 .env
 .envgit/
 .DS_Store
+
+# demo raw transcripts (local paths, session metadata)
+demo/results/*.jsonl
+demo/results/prelim/

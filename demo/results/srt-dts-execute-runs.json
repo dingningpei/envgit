@@ -1,0 +1,41 @@
+[
+  {
+    "corpus": "srt-dts",
+    "arm": "execute",
+    "run": 1,
+    "requests": 8,
+    "toolCalls": 7,
+    "toolResultChars": 69007,
+    "firstRequestContext": 3821,
+    "contextTokens": 99232,
+    "outputTokens": 9106,
+    "costUsd": 0.4146474,
+    "correct": true
+  },
+  {
+    "corpus": "srt-dts",
+    "arm": "execute",
+    "run": 2,
+    "requests": 7,
+    "toolCalls": 6,
+    "toolResultChars": 18850,
+    "firstRequestContext": 3821,
+    "contextTokens": 52986,
+    "outputTokens": 9485,
+    "costUsd": 0.3122726,
+    "correct": true
+  },
+  {
+    "corpus": "srt-dts",
+    "arm": "execute",
+    "run": 3,
+    "requests": 7,
+    "toolCalls": 6,
+    "toolResultChars": 25416,
+    "firstRequestContext": 3823,
+    "contextTokens": 59358,
+    "outputTokens": 9145,
+    "costUsd": 0.326442,
+    "correct": true
+  }
+]

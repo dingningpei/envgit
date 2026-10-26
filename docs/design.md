@@ -98,7 +98,7 @@ The product promise is *audit + gate + in-sandbox rewind*, not a time machine.
 ## 5. Milestones
 
 1. **M0** — `envgit init` / policy file / `envgit run <cmd>` on the srt backend with an action log.
-2. **M1** — REPL with persistent state and capability injection, exposed as an MCP server. Demo: same task, 10× fewer tokens.
+2. **M1** — REPL with persistent state and capability injection, exposed as an MCP server. Demo ([`demo-m1.md`](demo-m1.md)): 1.6× fewer context tokens on a 48 KB task, 9.4× (3.8× cost) on a 380 KB task where per-capability tools hit Claude Code's result-size limit and got the answer wrong.
 3. **M2** — Firecracker backend with per-step snapshots; `envgit log`, `envgit fork <step>`, `envgit rewind <step>`.
 4. **M3** — Codex self-hosted environment adapter; irreversible-action gating through the egress proxy.
 5. **M4** — Apple Virtualization backend; web UI timeline.

@@ -33,7 +33,7 @@ Isolation is infrastructure — bubblewrap, Seatbelt, Firecracker, gVisor alread
 Early. See [`docs/design.md`](docs/design.md) for the plan.
 
 - **M0** — `envgit init`, `envgit run <cmd...>`: runs a command under [`sandbox-runtime`](https://github.com/anthropics/sandbox-runtime) with the policy in `.envgit/policy.yaml` and appends a step to `.envgit/sessions/<id>/steps.jsonl`.
-- **M1** — `envgit mcp`: a persistent JavaScript REPL running inside the sandbox, exposed as one MCP tool, `execute`. Capabilities listed under `capabilities:` in the policy (`fs`, `http`, `github: [listIssues, getIssue]`) are injected as async functions; each call is logged as a step with the files and hosts it touched or was denied.
+- **M1** — `envgit mcp`: a persistent JavaScript REPL running inside the sandbox, exposed as one MCP tool, `execute`. Capabilities listed under `capabilities:` in the policy (`fs`, `http`, `github: [listIssues, getIssue]`) are injected as async functions; each call is logged as a step with the files and hosts it touched or was denied. Measured against one-tool-per-capability: 1.6× fewer context tokens on a small task, 9.4× on a large one ([demo](docs/demo-m1.md)).
 
 ```bash
 npm install && npm run build

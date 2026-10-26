@@ -1,0 +1,729 @@
+[
+  {
+    "file": "types/address.d.ts",
+    "builtins": [
+      "net"
+    ],
+    "exports": [
+      "LOOPBACK_RANGES",
+      "addRange",
+      "addressInSet",
+      "embeddedIPv4",
+      "isLoopbackAddress",
+      "isLoopbackName",
+      "mappedIPv4",
+      "parseAddressRange"
+    ]
+  },
+  {
+    "file": "types/aws-sigv4.d.ts",
+    "builtins": [
+      "http"
+    ],
+    "exports": [
+      "ParsedSigv4Authorization",
+      "SIGV4A_ALGORITHM",
+      "SIGV4_ALGORITHM",
+      "Sigv4Detection",
+      "Sigv4Kind",
+      "Sigv4SignInput",
+      "Sigv4SignResult",
+      "UNSIGNED_PAYLOAD",
+      "buildCanonicalRequest",
+      "buildStringToSign",
+      "canonicalQueryString",
+      "canonicalUri",
+      "deriveSigningKey",
+      "detectSigv4",
+      "parseSigv4Authorization",
+      "sha256Hex",
+      "signSigv4",
+      "singleHeader",
+      "uriEncode"
+    ]
+  },
+  {
+    "file": "types/body-substitution.d.ts",
+    "builtins": [
+      "http",
+      "stream"
+    ],
+    "exports": [
+      "GetBodySubstitutions",
+      "SentinelBufferPair",
+      "allLengthMatched",
+      "createBodySubstitutionTransform",
+      "prepareBodySubstitution"
+    ]
+  },
+  {
+    "file": "types/credential-aws-pairs.d.ts",
+    "builtins": [
+      "http"
+    ],
+    "exports": [
+      "AWS_ACCESS_KEY_ID_VAR",
+      "AWS_SECRET_ACCESS_KEY_VAR",
+      "AWS_SESSION_TOKEN_VAR",
+      "AwsCredentialPair",
+      "AwsPairRegistry",
+      "PlanSigv4",
+      "Sigv4Plan",
+      "Sigv4Policy",
+      "createSigv4Planner",
+      "registerAwsPairs",
+      "resolveSigv4Policies"
+    ]
+  },
+  {
+    "file": "types/credential-decode.d.ts",
+    "builtins": [],
+    "exports": [
+      "JWT_DEFAULT_EXTRACT_PATTERN",
+      "MaskedClaimsResult",
+      "maskJwtClaims",
+      "mintFakeJwt",
+      "verifyJwt"
+    ]
+  },
+  {
+    "file": "types/credential-extract.d.ts",
+    "builtins": [],
+    "exports": [
+      "ExtractOptions",
+      "ExtractResult",
+      "extractAndSubstitute"
+    ]
+  },
+  {
+    "file": "types/credential-mask-env.d.ts",
+    "builtins": [],
+    "exports": [
+      "MaskedEnvBuildResult",
+      "buildMaskedEnvVars"
+    ]
+  },
+  {
+    "file": "types/credential-mask-files.d.ts",
+    "builtins": [],
+    "exports": [
+      "MASKED_FILE_STORE_PREFIX",
+      "MaskedFileBind",
+      "MaskedFileBuildResult",
+      "MaskedFileStore",
+      "buildMaskedFileBinds"
+    ]
+  },
+  {
+    "file": "types/credential-sentinel.d.ts",
+    "builtins": [
+      "http"
+    ],
+    "exports": [
+      "HostMatcher",
+      "SENTINEL_PREFIX",
+      "SentinelRegistry"
+    ]
+  },
+  {
+    "file": "types/decider-client.d.ts",
+    "builtins": [
+      "stream"
+    ],
+    "exports": [
+      "CredentialPlacement",
+      "DECIDER_PROTO",
+      "Decider",
+      "DeciderHello",
+      "DeciderOptions",
+      "MAX_QUEUED_BYTES",
+      "createDecider",
+      "encodeBodyFrame",
+      "encodeFrame",
+      "isEgressEntry",
+      "reqFrameFields"
+    ]
+  },
+  {
+    "file": "types/domain-pattern.d.ts",
+    "builtins": [],
+    "exports": [
+      "ALLOWED_DOMAIN_ENTRY_MESSAGE",
+      "DOMAIN_PATTERN_MESSAGE",
+      "hasValidIpv6Bracketing",
+      "ipLiteralRules",
+      "isInjectHostCoveredByAllowedDomains",
+      "isValidAllowedDomainEntry",
+      "isValidDomainPattern",
+      "matchesDomainPattern",
+      "matchesDomainPatternWithPort",
+      "splitDomainPatternPort",
+      "stripDomainPatternPort"
+    ]
+  },
+  {
+    "file": "types/emitted-connection.d.ts",
+    "builtins": [
+      "http",
+      "net"
+    ],
+    "exports": [
+      "ByteBudget",
+      "adjustByteBudget",
+      "assertTlsTerminationSupported",
+      "createByteBudget",
+      "endRequestAfterResponse",
+      "gateSocketOnBufferedBody",
+      "keepFlushedHeaderBatches",
+      "markEndsGracefully",
+      "overrideEmittedConnectionProbe",
+      "runsOnBun",
+      "servesEmittedConnections",
+      "writeHeadsAsLatin1"
+    ]
+  },
+  {
+    "file": "types/generate-seccomp-filter.d.ts",
+    "builtins": [],
+    "exports": [
+      "getApplySeccompBinaryPath",
+      "getApplySeccompBinaryPathAsync",
+      "getGlobalNpmPaths",
+      "getGlobalNpmPathsAsync"
+    ]
+  },
+  {
+    "file": "types/glob-pattern.d.ts",
+    "builtins": [],
+    "exports": [
+      "GlobToken",
+      "denyGlobRegex",
+      "escapeRegexLiteral",
+      "globToRegex",
+      "globTokenToRegex",
+      "parseGlob"
+    ]
+  },
+  {
+    "file": "types/http-proxy.d.ts",
+    "builtins": [
+      "http",
+      "net",
+      "stream"
+    ],
+    "exports": [
+      "HttpProxyServerOptions",
+      "createHttpProxyServer",
+      "markHandedInConnection"
+    ]
+  },
+  {
+    "file": "types/java-proxy-agent.d.ts",
+    "builtins": [],
+    "exports": [
+      "JAVA_PROXY_AGENT_JAR_NAME",
+      "buildJavaToolOptions",
+      "getJavaProxyAgentJarPathAsync"
+    ]
+  },
+  {
+    "file": "types/linux-sandbox-utils.d.ts",
+    "builtins": [
+      "child_process"
+    ],
+    "exports": [
+      "CAP_SETFCAP",
+      "CAP_SETFCAP_MISSING_MESSAGE",
+      "LinuxDependencyOptions",
+      "LinuxDependencyStatus",
+      "LinuxNetworkBridgeContext",
+      "LinuxSandboxParams",
+      "LinuxSandboxProfileError",
+      "LinuxSandboxProfileErrorCode",
+      "OLDEST_FULLY_SUPPORTED_BWRAP_VERSION",
+      "SandboxDependencyCheck",
+      "WorkingDirectoryChanged",
+      "boundingCapabilitiesFromStatus",
+      "bwrapCanDisableUserns",
+      "capabilityArgs",
+      "checkLinuxDependencies",
+      "cleanupBwrapMountPoints",
+      "getLinuxDependencyStatus",
+      "initializeLinuxNetworkBridge",
+      "linuxGetCwdMandatoryDenyPaths",
+      "processHasBoundingCapability",
+      "uid0SandboxError",
+      "unreadableDirectories",
+      "wrapCommandWithSandboxLinux"
+    ]
+  },
+  {
+    "file": "types/linux-violation-monitor.d.ts",
+    "builtins": [],
+    "exports": [
+      "LinuxViolationMonitor",
+      "LinuxViolationMonitorOptions",
+      "startLinuxSandboxViolationMonitor"
+    ]
+  },
+  {
+    "file": "types/listen-in-range.d.ts",
+    "builtins": [],
+    "exports": [
+      "listenInRange"
+    ]
+  },
+  {
+    "file": "types/macos-sandbox-utils.d.ts",
+    "builtins": [],
+    "exports": [
+      "MacOSSandboxParams",
+      "PathEntry",
+      "SandboxViolationCallback",
+      "SandboxViolationEvent",
+      "macGetMandatoryDenyEntries",
+      "startMacOSSandboxLogMonitor",
+      "wrapCommandWithSandboxMacOS"
+    ]
+  },
+  {
+    "file": "types/mitm-ca.d.ts",
+    "builtins": [
+      "tls"
+    ],
+    "exports": [
+      "CRL_PATH",
+      "CaPairValidation",
+      "GeneratedCa",
+      "MitmCA",
+      "caSubjectKeyId",
+      "certThumbprint",
+      "createMitmCA",
+      "daysFromNow",
+      "disposeMitmCA",
+      "disposeMitmCASync",
+      "generateCa",
+      "generateEmptyCrl",
+      "randomSerial",
+      "rsaSha256SignNative",
+      "signCertificateNative",
+      "validateCaPair"
+    ]
+  },
+  {
+    "file": "types/mitm-leaf.d.ts",
+    "builtins": [
+      "tls"
+    ],
+    "exports": [
+      "LeafCert",
+      "mintLeafCert",
+      "secureContextFor"
+    ]
+  },
+  {
+    "file": "types/mux-proxy.d.ts",
+    "builtins": [
+      "http",
+      "net"
+    ],
+    "exports": [
+      "MuxProxyOptions",
+      "MuxProxyServer",
+      "createMuxProxyServer"
+    ]
+  },
+  {
+    "file": "types/own-files.d.ts",
+    "builtins": [],
+    "exports": [
+      "ownInstallWarning"
+    ]
+  },
+  {
+    "file": "types/parent-proxy.d.ts",
+    "builtins": [
+      "http",
+      "net",
+      "url"
+    ],
+    "exports": [
+      "ConnectTunnelOptions",
+      "DirectLookup",
+      "DirectRequestOptions",
+      "ResolvedParentProxy",
+      "canonicalizeHost",
+      "connectViaParentProxy",
+      "dialDirect",
+      "directRequestOptions",
+      "formatAuthority",
+      "isValidHost",
+      "onUpstreamError",
+      "openConnectTunnel",
+      "proxyAuthHeader",
+      "redactUrl",
+      "relayResponseHead",
+      "resolveParentProxy",
+      "selectParentProxyUrl",
+      "shouldBypassParentProxy",
+      "stripBrackets",
+      "stripHopByHop"
+    ]
+  },
+  {
+    "file": "types/path-entries.d.ts",
+    "builtins": [],
+    "exports": [
+      "PathListKind",
+      "PathReading",
+      "hasNameReading",
+      "literalReadLists",
+      "literalReadings",
+      "literalWriteLists",
+      "reExposedBy",
+      "readNamesOf",
+      "readRulesOf",
+      "samePathEntries",
+      "spelledOf",
+      "splitPathEntries",
+      "withOtherReadings",
+      "writeNamesOf",
+      "writeRootsOf"
+    ]
+  },
+  {
+    "file": "types/proxy-only.d.ts",
+    "builtins": [
+      "http",
+      "net",
+      "stream"
+    ],
+    "exports": [
+      "DEFAULT_CREDENTIAL_PLACEMENTS",
+      "DEFAULT_DENIED_RESOLVED_ADDRESSES",
+      "ProxyListen",
+      "ProxyOnly",
+      "ProxyOnlyOptions",
+      "REQUEST_HEAD_LIMIT",
+      "isBunRuntime",
+      "openFdStreams",
+      "readPemFromFd",
+      "startProxyOnly"
+    ]
+  },
+  {
+    "file": "types/read-deny-glob.d.ts",
+    "builtins": [],
+    "exports": [
+      "expandReadDenyGlobLinux",
+      "expandReadDenyGlobLinuxSteps"
+    ]
+  },
+  {
+    "file": "types/request-filter.d.ts",
+    "builtins": [
+      "http",
+      "stream"
+    ],
+    "exports": [
+      "AmbiguousRequestTarget",
+      "BODYLESS_METHODS",
+      "DEFAULT_DENY_REASON",
+      "DenyMark",
+      "FilterRequestCallback",
+      "MutateForwardedHeaders",
+      "RequestDecision",
+      "RequestInfo",
+      "applyHeaderEdits",
+      "decideAndRespond",
+      "foldHeaderName",
+      "hostHeaderValues",
+      "hostMismatch",
+      "normalizeRequestTarget",
+      "notifyResponse",
+      "rawDenied",
+      "readRequestTarget",
+      "refuseUnparsedRequest",
+      "removeHeadersFolded",
+      "requestTargetAsSpelled",
+      "respondDenied",
+      "respondRefusedTarget",
+      "respondUpstreamError"
+    ]
+  },
+  {
+    "file": "types/resolved-address-guard.d.ts",
+    "builtins": [
+      "dns",
+      "net"
+    ],
+    "exports": [
+      "ResolvedAddressDeniedError",
+      "ResolvedAddressGuard",
+      "ResolvedAddressGuardOptions",
+      "Resolver",
+      "createResolvedAddressGuard",
+      "isResolvedAddressDenied",
+      "localInterfaceAddresses"
+    ]
+  },
+  {
+    "file": "types/sandbox-config.d.ts",
+    "builtins": [],
+    "exports": [
+      "AwsPairConfig",
+      "AwsPairConfigSchema",
+      "CredentialEnvVarConfig",
+      "CredentialEnvVarConfigSchema",
+      "CredentialFileConfig",
+      "CredentialFileConfigSchema",
+      "CredentialMode",
+      "CredentialsConfig",
+      "CredentialsConfigSchema",
+      "FilesystemConfig",
+      "FilesystemConfigSchema",
+      "FilesystemPathEntry",
+      "GitConfig",
+      "GitConfigSchema",
+      "IgnoreViolationsConfig",
+      "IgnoreViolationsConfigSchema",
+      "MitmProxyConfig",
+      "NetworkConfig",
+      "NetworkConfigSchema",
+      "ParentProxyConfig",
+      "RipgrepConfig",
+      "RipgrepConfigSchema",
+      "SandboxRuntimeConfig",
+      "SandboxRuntimeConfigSchema",
+      "SeccompConfig",
+      "SeccompConfigSchema",
+      "Sigv4Config",
+      "Sigv4ConfigSchema",
+      "SrtWinConfig",
+      "SrtWinConfigSchema",
+      "WindowsConfig",
+      "WindowsConfigSchema"
+    ]
+  },
+  {
+    "file": "types/sandbox-manager.d.ts",
+    "builtins": [],
+    "exports": [
+      "ISandboxManager",
+      "SandboxInitializeOptions",
+      "SandboxManager",
+      "WindowsProfileReadWarning",
+      "WrapWithSandboxOptions",
+      "registerCommandText",
+      "resolveCommandText",
+      "windowsProfileReadWarningsOf"
+    ]
+  },
+  {
+    "file": "types/sandbox-schemas.d.ts",
+    "builtins": [],
+    "exports": [
+      "CredentialRestrictionConfig",
+      "FsReadRestrictionConfig",
+      "FsWriteRestrictionConfig",
+      "NetworkHostPattern",
+      "NetworkRestrictionConfig",
+      "SandboxAskCallback"
+    ]
+  },
+  {
+    "file": "types/sandbox-utils.d.ts",
+    "builtins": [],
+    "exports": [
+      "CA_TRUST_VARS",
+      "DANGEROUS_DIRECTORIES",
+      "DANGEROUS_FILES",
+      "ExpandGlobOptions",
+      "GlobWalk",
+      "GlobWalkListings",
+      "GlobWalkOptions",
+      "MAX_ENCODED_COMMAND_BYTES",
+      "PROXY_AUTH_USER",
+      "SANDBOXED_COMMAND_KEY_LENGTH",
+      "Steps",
+      "attributionKeyFor",
+      "buildGitConfigEnv",
+      "buildPosixGitSafeDirEnv",
+      "collapseInteriorSpellings",
+      "containsGlobChars",
+      "containsGlobCharsForPlatform",
+      "containsGlobCharsWin",
+      "decodeSandboxedCommand",
+      "encodeSandboxedCommand",
+      "encodedCommandFromProxyUser",
+      "expandGlobPattern",
+      "expandTilde",
+      "expandWindowsEnvRefs",
+      "finish",
+      "finishInTurns",
+      "generateProxyEnvVars",
+      "getDangerousDirectories",
+      "getDefaultWritePaths",
+      "globBaseDirIsRoot",
+      "globPatternBaseDir",
+      "isAbsenceErrno",
+      "isAtOrUnder",
+      "isStrictlyUnder",
+      "isSymlinkOutsideBoundary",
+      "isUncPath",
+      "markedLiteralPath",
+      "nameLocation",
+      "normalizeCaseForComparison",
+      "normalizePathForSandbox",
+      "pathSpellings",
+      "properAncestors",
+      "proxyUsernameFor",
+      "removeTrailingGlobSuffix",
+      "sshConnectScript",
+      "stripExtendedPathPrefix",
+      "toForwardSlashes",
+      "walkGlobPattern",
+      "walkGlobPatternSteps",
+      "workingDirectory"
+    ]
+  },
+  {
+    "file": "types/sandbox-violation-store.d.ts",
+    "builtins": [],
+    "exports": [
+      "MAX_DENIAL_REASON_LENGTH",
+      "SandboxViolationStore",
+      "sanitizeDenialReason",
+      "sanitizeUnregisteredCommandKey",
+      "shouldIgnoreViolation"
+    ]
+  },
+  {
+    "file": "types/socks-proxy.d.ts",
+    "builtins": [],
+    "exports": [
+      "SocksProxyServerOptions",
+      "SocksProxyWrapper",
+      "createSocksProxyServer"
+    ]
+  },
+  {
+    "file": "types/tls-terminate-proxy.d.ts",
+    "builtins": [
+      "http",
+      "net",
+      "stream",
+      "tls"
+    ],
+    "exports": [
+      "MAX_SIGV4_RESIGN_BODY_BYTES",
+      "ServerName",
+      "TUNNEL_TIMEOUTS",
+      "TerminateTarget",
+      "TunnelTimeouts",
+      "boundTunnel",
+      "closeAfterFlush",
+      "looksLikeClientHello",
+      "peekForClientHello",
+      "serverNameFromClientHello",
+      "serverTlsOn",
+      "terminateAndForward"
+    ]
+  },
+  {
+    "file": "types/windows-sandbox-utils.d.ts",
+    "builtins": [],
+    "exports": [
+      "DEFAULT_WINDOWS_PROXY_PORT_RANGE",
+      "MappedDriveCwdError",
+      "SRT_WIN_DISPATCH_ARG1",
+      "SRT_WIN_EXIT_GRANT_BLOCKED",
+      "SRT_WIN_EXIT_HELD_BY_OTHERS",
+      "SRT_WIN_EXIT_PROFILE_BUSY",
+      "SRT_WIN_EXIT_SESSION_ENDED",
+      "SeclogonDisabledError",
+      "SrtWinSpawn",
+      "VENDORED_SRT_WIN_EXE",
+      "WINDOWS_ALLOW_LOOPBACK_EFFECT",
+      "WINDOWS_LOOPBACK_NO_PROXY",
+      "WINDOWS_LOOPBACK_PROBE_PORT",
+      "WINDOWS_PROFILE_READ_ENV_VARS",
+      "WINDOWS_SRT_WIN_CAPABILITIES",
+      "WindowsAclAceOutcome",
+      "WindowsAclGrantOptions",
+      "WindowsAclRevokeResult",
+      "WindowsAclStampOptions",
+      "WindowsBinShell",
+      "WindowsFsAccessSet",
+      "WindowsInstallContext",
+      "WindowsInstallOptions",
+      "WindowsInstallProfileGrant",
+      "WindowsInstallResult",
+      "WindowsPersistentCa",
+      "WindowsProfileExclusionConflict",
+      "WindowsProfileGrantItem",
+      "WindowsProfileGrantOptions",
+      "WindowsProfileGrantPath",
+      "WindowsProfileGrantResult",
+      "WindowsProfileGrantState",
+      "WindowsProfileGrantStatus",
+      "WindowsSandboxError",
+      "WindowsSandboxErrorCode",
+      "WindowsSandboxParams",
+      "WindowsSandboxStatus",
+      "WindowsSandboxUserStatus",
+      "WindowsSeclogonState",
+      "WindowsWfpProbeOutcome",
+      "WindowsWfpResidual",
+      "WindowsWfpStatus",
+      "WindowsWfpStatusResult",
+      "WindowsWfpVerifyResult",
+      "checkWindowsDependencies",
+      "checkWindowsDependenciesAsync",
+      "checkWindowsSandboxStatus",
+      "checkWindowsSandboxStatusAsync",
+      "ensurePersistentWindowsCa",
+      "expandWindowsFsPaths",
+      "forgetWindowsProfileRead",
+      "forgetWindowsProfileReadAsync",
+      "getSrtWinPath",
+      "getWindowsProfileReadStatus",
+      "getWindowsProfileReadStatusAsync",
+      "getWindowsSandboxCaCert",
+      "getWindowsSandboxUserStatus",
+      "getWindowsSandboxUserStatusAsync",
+      "getWindowsWfpStatus",
+      "getWindowsWfpStatusAsync",
+      "grantWindowsAcl",
+      "grantWindowsAclPersistent",
+      "grantWindowsProfileRead",
+      "installWindowsSandbox",
+      "installWindowsSandboxAsync",
+      "interpretWindowsWfpVerify",
+      "mergeWindowsEnv",
+      "missingWindowsSrtWinCapability",
+      "parseWindowsBinShell",
+      "parseWindowsSandboxError",
+      "rankWindowsFsAccess",
+      "resolveSrtWin",
+      "restoreWindowsAcl",
+      "revokeWindowsAcl",
+      "revokeWindowsAclChecked",
+      "stampWindowsAcl",
+      "uninstallWindowsSandbox",
+      "verifyWindowsWfpEgress",
+      "windowsGrantsBeneathDenies",
+      "windowsInstallInstructions",
+      "windowsProfileExclusionConflicts",
+      "windowsProfileGrantNotice",
+      "windowsProfileGrantSkipReason",
+      "windowsProfileReadEnv",
+      "windowsSetupVersionMismatch",
+      "windowsSrtWinOutdatedError",
+      "windowsStateDir",
+      "windowsTrustCa",
+      "windowsTrustCaAsync",
+      "wrapCommandWithSandboxWindows"
+    ]
+  }
+]

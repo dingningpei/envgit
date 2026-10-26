@@ -1,0 +1,134 @@
+[
+  {
+    "file": "src/adapters/mcp/server.ts",
+    "builtins": [],
+    "exports": [
+      "McpMode",
+      "serveMcp"
+    ]
+  },
+  {
+    "file": "src/cli/index.ts",
+    "builtins": [
+      "fs/promises",
+      "path",
+      "url"
+    ],
+    "exports": []
+  },
+  {
+    "file": "src/core/env/backend.ts",
+    "builtins": [],
+    "exports": [
+      "Command",
+      "Effect",
+      "Env",
+      "EnvBackend",
+      "EnvSpec",
+      "ExecResult",
+      "SnapshotId"
+    ]
+  },
+  {
+    "file": "src/core/env/srt.ts",
+    "builtins": [
+      "child_process",
+      "crypto",
+      "os"
+    ],
+    "exports": [
+      "SrtBackend",
+      "shellQuote",
+      "toEffect"
+    ]
+  },
+  {
+    "file": "src/core/policy/compile.ts",
+    "builtins": [],
+    "exports": [
+      "compileSrt",
+      "matchIrreversible"
+    ]
+  },
+  {
+    "file": "src/core/policy/load.ts",
+    "builtins": [
+      "fs/promises"
+    ],
+    "exports": [
+      "loadPolicy"
+    ]
+  },
+  {
+    "file": "src/core/policy/schema.ts",
+    "builtins": [],
+    "exports": [
+      "IrreversibleRule",
+      "Policy"
+    ]
+  },
+  {
+    "file": "src/core/snapshot/log.ts",
+    "builtins": [
+      "crypto",
+      "fs/promises",
+      "path"
+    ],
+    "exports": [
+      "Session",
+      "SessionMeta",
+      "Step",
+      "appendStep",
+      "nextStepIndex",
+      "openSession",
+      "readSteps"
+    ]
+  },
+  {
+    "file": "src/repl/capabilities.ts",
+    "builtins": [
+      "fs/promises",
+      "path"
+    ],
+    "exports": [
+      "Capabilities",
+      "buildCapabilities"
+    ]
+  },
+  {
+    "file": "src/repl/engine.ts",
+    "builtins": [
+      "util",
+      "vm"
+    ],
+    "exports": [
+      "Engine",
+      "ExecuteResult",
+      "VmEngine",
+      "rewrite"
+    ]
+  },
+  {
+    "file": "src/repl/session.ts",
+    "builtins": [
+      "child_process",
+      "readline"
+    ],
+    "exports": [
+      "ReplResult",
+      "ReplSession"
+    ]
+  },
+  {
+    "file": "src/repl/worker.ts",
+    "builtins": [
+      "readline"
+    ],
+    "exports": [
+      "CAPABILITIES_ENV",
+      "WorkerMessage",
+      "WorkerRequest",
+      "runWorker"
+    ]
+  }
+]

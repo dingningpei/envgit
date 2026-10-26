@@ -1,0 +1,26 @@
+[
+  {
+    "corpus": "src",
+    "arm": "tools",
+    "correct": "3/3",
+    "requests": 5,
+    "toolCalls": 21,
+    "toolResultChars": 36058,
+    "firstRequestContext": 3733,
+    "contextTokens": 37044,
+    "outputTokens": 2733,
+    "costUsd": 0.2108372
+  },
+  {
+    "corpus": "src",
+    "arm": "execute",
+    "correct": "3/3",
+    "requests": 2,
+    "toolCalls": 1,
+    "toolResultChars": 37083,
+    "firstRequestContext": 3791,
+    "contextTokens": 23267,
+    "outputTokens": 1207,
+    "costUsd": 0.1699338
+  }
+]

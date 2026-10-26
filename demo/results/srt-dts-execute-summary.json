@@ -1,0 +1,14 @@
+[
+  {
+    "corpus": "srt-dts",
+    "arm": "execute",
+    "correct": "3/3",
+    "requests": 7,
+    "toolCalls": 6,
+    "toolResultChars": 25416,
+    "firstRequestContext": 3821,
+    "contextTokens": 59358,
+    "outputTokens": 9145,
+    "costUsd": 0.326442
+  }
+]
