@@ -1,10 +1,12 @@
 /** Environment backend contract. See docs/design.md §3.1 */
+import type { Policy } from '../policy/schema.js'
 
 export type SnapshotId = string & { readonly __brand: 'SnapshotId' }
 
 export interface EnvSpec {
   workdir: string
   image?: string
+  policy?: Policy
 }
 
 export interface Env {
@@ -36,6 +38,6 @@ export interface EnvBackend {
   create(spec: EnvSpec): Promise<Env>
   snapshot(env: Env): Promise<SnapshotId>
   restore(id: SnapshotId): Promise<Env>
-  exec(env: Env, cmd: Command): Promise<ExecResult>
+  exec(env: Env, cmd: Command, signal?: AbortSignal): Promise<ExecResult>
   destroy(env: Env): Promise<void>
 }

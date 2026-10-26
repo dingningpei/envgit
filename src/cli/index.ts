@@ -1,5 +1,13 @@
 #!/usr/bin/env node
-const [cmd = 'help'] = process.argv.slice(2)
+import { access, copyFile, mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { SrtBackend } from '../core/env/srt.js'
+import { matchIrreversible } from '../core/policy/compile.js'
+import { loadPolicy } from '../core/policy/load.js'
+import { appendStep, nextStepIndex, openSession, type Step } from '../core/snapshot/log.js'
+
+const [cmd = 'help', ...args] = process.argv.slice(2)
 
 const help = `envgit — version control for agent execution environments
 
@@ -9,9 +17,87 @@ const help = `envgit — version control for agent execution environments
   envgit fork <step>     fork the environment at a step
   envgit rewind <step>   rewind the environment to a step
 
-(all commands are stubs — see docs/design.md)`
+(log, fork and rewind are stubs — see docs/design.md)`
 
-switch (cmd) {
-  default:
-    console.log(help)
+const ROOT = join(process.cwd(), '.envgit')
+const POLICY = join(ROOT, 'policy.yaml')
+const DEFAULT_POLICY = fileURLToPath(new URL('../../examples/policy.yaml', import.meta.url))
+const red = (s: string) => (process.stderr.isTTY ? `\x1b[31m${s}\x1b[0m` : s)
+
+async function exists(path: string): Promise<boolean> {
+  return access(path).then(() => true, () => false)
 }
+
+async function init(): Promise<number> {
+  if (await exists(POLICY)) {
+    console.error(`envgit: ${POLICY} already exists`)
+    return 1
+  }
+  await mkdir(join(ROOT, 'sessions'), { recursive: true })
+  await copyFile(DEFAULT_POLICY, POLICY)
+  console.log(`initialized ${ROOT}`)
+  return 0
+}
+
+async function run(argv: string[]): Promise<number> {
+  if (argv[0] === '--') argv = argv.slice(1)
+  if (argv.length === 0) {
+    console.error('usage: envgit run <cmd...>')
+    return 2
+  }
+  if (!(await exists(POLICY))) {
+    console.error('envgit: no .envgit/policy.yaml here — run `envgit init` first')
+    return 1
+  }
+  const policy = await loadPolicy(POLICY)
+  const backend = new SrtBackend()
+  const session = await openSession(ROOT, backend.name)
+  const irreversible = matchIrreversible(policy, argv)
+  if (irreversible) console.error(red(`envgit: irreversible action (${irreversible}) — not gated in M0, logging only`))
+
+  const env = await backend.create({ workdir: process.cwd(), policy })
+  const ac = new AbortController()
+  const onSigint = () => ac.abort()
+  process.on('SIGINT', onSigint)
+  try {
+    const startedAt = new Date().toISOString()
+    const result = await backend.exec(env, { argv }, ac.signal)
+    const step: Step = {
+      index: await nextStepIndex(session.dir),
+      startedAt,
+      endedAt: new Date().toISOString(),
+      action: { type: 'exec', input: JSON.stringify(argv) },
+      exitCode: result.exitCode,
+      effects: result.effects,
+      ...(irreversible && { irreversible: { reason: irreversible } }),
+    }
+    await appendStep(session.dir, step)
+    for (const e of result.effects) {
+      if (e.kind === 'policy' && /\b(file-|network-)/.test(e.reason)) console.error(red(`envgit: denied ${e.reason}`))
+    }
+    console.error(`envgit: step ${step.index} recorded in session ${session.meta.id}`)
+    return result.exitCode
+  } finally {
+    process.off('SIGINT', onSigint)
+    await backend.destroy(env)
+  }
+}
+
+let code: number
+try {
+  switch (cmd) {
+    case 'init':
+      code = await init()
+      break
+    case 'run':
+      code = await run(args)
+      break
+    default:
+      console.log(help)
+      code = 0
+  }
+} catch (e) {
+  console.error(`envgit: ${e instanceof Error ? e.message : String(e)}`)
+  code = 1
+}
+process.exit(code)

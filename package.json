@@ -4,19 +4,26 @@
   "description": "Version control for agent execution environments",
   "license": "Apache-2.0",
   "type": "module",
-  "bin": { "envgit": "./dist/cli/index.js" },
+  "bin": {
+    "envgit": "./dist/cli/index.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
     "lint": "eslint src"
   },
-  "engines": { "node": ">=22" },
-  "dependencies": {},
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "^0.0.81",
+    "yaml": "^2.9.1"
+  },
   "devDependencies": {
-    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "vitest": "^2.1.0",
-    "@types/node": "^22.0.0"
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
   }
 }
