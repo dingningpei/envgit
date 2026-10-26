@@ -6,10 +6,11 @@ import { buildCapabilities } from '../../repl/capabilities.js'
 import type { ReplSession } from '../../repl/session.js'
 import type { Effect } from '../../core/env/backend.js'
 import type { Policy } from '../../core/policy/schema.js'
+import type { Approver, Gate } from '../../core/policy/gate.js'
 
 export type McpMode = 'repl' | 'tools'
 
-export async function serveMcp(repl: ReplSession, policy: Policy, workdir: string, mode: McpMode = 'repl'): Promise<void> {
+export async function serveMcp(repl: ReplSession, policy: Policy, workdir: string, mode: McpMode = 'repl', gate?: Gate): Promise<void> {
   const { declarations, globals } = buildCapabilities(policy.capabilities ?? {}, workdir)
   const server = new McpServer(
     { name: 'envgit', version: '0.0.1' },
@@ -23,6 +24,7 @@ export async function serveMcp(repl: ReplSession, policy: Policy, workdir: strin
   if (mode === 'tools') registerDirectTools(server, repl, globals)
   else registerExecute(server, repl, declarations)
   const closed = new Promise<void>(resolve => (server.server.onclose = resolve))
+  if (gate) askThroughClient(server, gate)
   await server.connect(new StdioServerTransport())
   await closed
 }
@@ -43,12 +45,35 @@ function registerExecute(server: McpServer, repl: ReplSession, declarations: str
   )
 }
 
+/** Once the client has said what it supports: if it can elicit, `ask` rules ask its user. */
+export function askThroughClient(server: McpServer, gate: Gate): void {
+  server.server.oninitialized = () => {
+    if (server.server.getClientCapabilities()?.elicitation) gate.setApprover(elicitApprover(server), 'the MCP client')
+  }
+}
+
+/** Asks the person behind the MCP client (e.g. Claude Code's dialog); decline, cancel or no answer denies. */
+function elicitApprover(server: McpServer): Approver {
+  return async ({ action, rule }) => {
+    const r = await server.server.elicitInput(
+      {
+        mode: 'form',
+        message: `envgit: the sandbox wants to do something irreversible:\n\n  ${action}\n\nrule: ${rule}. Allow it?`,
+        requestedSchema: { type: 'object', properties: { allow: { type: 'boolean', title: 'Allow this action', default: false } }, required: ['allow'] },
+      },
+      { timeout: 5 * 60_000 },
+    )
+    return r.action === 'accept' && r.content?.allow === true
+  }
+}
+
 function describeDenial(e: Effect): string[] {
   switch (e.kind) {
     case 'fs':
       return e.denied ? [`fs ${e.op} ${e.path}`] : []
     case 'net':
-      return e.denied ? [`net ${e.method ?? ''} ${e.host}:${e.port}`.replace('  ', ' ')] : []
+      if (!e.denied) return []
+      return [`net ${e.method ?? ''} ${e.host}${e.path ?? `:${e.port}`}${e.irreversible ? ` — irreversible (${e.irreversible.rule}), not approved` : ''}`.replace('  ', ' ')]
     case 'policy':
       return /\b(file|network)-\S+\s+\S/.test(e.reason) ? [e.reason] : []
     default:

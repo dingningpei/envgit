@@ -94,7 +94,9 @@ function traceFetch(onEffect: (e: Effect) => void): typeof fetch {
     const net = { kind: 'net' as const, host: url.hostname, port: Number(url.port) || (url.protocol === 'http:' ? 80 : 443), method, path: url.pathname }
     try {
       const res = await fetch(input, init)
-      onEffect(net)
+      // A 403 from envgit's gate is already on the step as the gate's own effect; don't record it twice.
+      const gated = res.status === 403 && (await res.clone().text().then(t => t.startsWith('envgit: '), () => false))
+      if (!gated) onEffect(net)
       return res
     } catch (e) {
       if (proxyRefused(e)) onEffect({ ...net, denied: true })

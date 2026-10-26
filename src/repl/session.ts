@@ -4,6 +4,7 @@ import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
+import { irreversibleOf } from '../core/policy/gate.js'
 import type { Effect, Env } from '../core/env/backend.js'
 import { toEffect, type SrtBackend } from '../core/env/srt.js'
 import type { Policy } from '../core/policy/schema.js'
@@ -96,7 +97,10 @@ export class ReplSession {
           worker.child.stdin!.write(JSON.stringify({ id, code } satisfies WorkerRequest) + '\n')
         }),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`timed out after ${this.timeoutMs}ms; REPL state was reset`)), this.timeoutMs)
+          // Time spent waiting for a person to approve an irreversible request does not count.
+          const arm = () =>
+            (timer = setTimeout(() => (this.backend.waitingForApproval ? arm() : reject(new Error(`timed out after ${this.timeoutMs}ms; REPL state was reset`))), this.timeoutMs))
+          arm()
         }),
         worker.exited.then(() => Promise.reject(new Error('REPL worker exited; REPL state was reset'))),
       ])
@@ -117,6 +121,7 @@ export class ReplSession {
     await new Promise(r => setTimeout(r, SETTLE_MS))
     const effects = [
       ...observed,
+      ...this.backend.gated(),
       ...this.backend
         .violations(worker.commandId)
         .filter(v => !this.claimed.has(v) && (this.claimed.add(v), true))
@@ -128,6 +133,7 @@ export class ReplSession {
       action: { type: 'repl', input: code },
       exitCode: error ? 1 : 0,
       effects,
+      ...(irreversibleOf(effects) && { irreversible: { reason: irreversibleOf(effects)! } }),
     })
     return { output, error, effects, step: step.index }
   }

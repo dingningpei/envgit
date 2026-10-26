@@ -4,6 +4,7 @@ import os from 'node:os'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { SandboxManager, type SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
 import { compileSrt } from '../policy/compile.js'
+import type { Gate } from '../policy/gate.js'
 import type { Command, Effect, Env, EnvBackend, EnvSpec, ExecResult, SnapshotId } from './backend.js'
 
 const MAX_CAPTURE = 1 << 20
@@ -15,13 +16,15 @@ export function shellQuote(argv: string[]): string {
 export class SrtBackend implements EnvBackend {
   readonly name = 'srt'
   private env?: Env & { workdir: string; snapshots?: EnvSpec['snapshots'] }
+  private gate?: Gate
 
   async create(spec: EnvSpec): Promise<Env> {
     if (this.env) throw new Error('srt: only one env per process')
     if (!SandboxManager.isSupportedPlatform()) {
       throw new Error(`srt: sandboxing is not supported on ${process.platform}`)
     }
-    await SandboxManager.initialize(compileSrt(spec.policy ?? {}), undefined, true)
+    this.gate = spec.gate
+    await SandboxManager.initialize(compileSrt(spec.policy ?? {}, spec.gate), undefined, true)
     if (!SandboxManager.isSandboxingEnabled()) throw new Error('srt: sandbox failed to initialize')
     this.env = { id: randomUUID(), backend: this.name, workdir: spec.workdir, snapshots: spec.snapshots }
     return this.env
@@ -56,7 +59,8 @@ export class SrtBackend implements EnvBackend {
     })
     const [file, ...args] = wrapped.argv
     if (!file) throw new Error('srt: empty wrapped command')
-    const child = spawn(file, args, { cwd, env: { ...wrapped.env, ...cmd.env }, stdio })
+    // Node's fetch ignores HTTP(S)_PROXY unless told to, and in the sandbox the proxy is the only way out.
+    const child = spawn(file, args, { cwd, env: { NODE_USE_ENV_PROXY: '1', ...wrapped.env, ...cmd.env }, stdio })
     return { child, commandId }
   }
 
@@ -65,11 +69,23 @@ export class SrtBackend implements EnvBackend {
     return SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
   }
 
+  /**
+   * Requests the gate judged since the last call. The gate is process-wide, so this attributes them to
+   * whatever ran in between — one step at a time, which the busy lock guarantees.
+   */
+  gated(): Effect[] {
+    return this.gate?.drain() ?? []
+  }
+
+  get waitingForApproval(): boolean {
+    return this.gate?.waitingForApproval ?? false
+  }
+
   async exec(env: Env, cmd: Command, signal?: AbortSignal): Promise<ExecResult> {
     const { child, commandId } = await this.spawn(env, cmd, ['inherit', 'pipe', 'pipe'], signal)
     try {
       const { exitCode, stdout, stderr } = await wait(child, signal)
-      return { exitCode, stdout, stderr, effects: this.violations(commandId).map(toEffect) }
+      return { exitCode, stdout, stderr, effects: [...this.gated(), ...this.violations(commandId).map(toEffect)] }
     } finally {
       SandboxManager.cleanupAfterCommand()
     }

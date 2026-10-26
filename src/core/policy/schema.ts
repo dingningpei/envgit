@@ -10,7 +10,10 @@ export interface Policy {
   network?: {
     allow?: string[]
     deny?: string[]
+    /** Per host (glob, optional `:port`): only these methods / paths (`*` one segment, `**` any) go through. */
     l7?: Record<string, { methods?: string[]; paths?: string[] }>
+    /** Hosts never TLS-terminated (certificate pinning, mTLS); request rules cannot see their HTTPS traffic. */
+    noInspect?: string[]
   }
   capabilities?: Record<string, boolean | string[]>
   irreversible?: IrreversibleRule[]
@@ -18,6 +21,9 @@ export interface Policy {
   snapshot?: { exclude?: string[] }
 }
 
+/** `ask` (default) a person, `deny`, or `allow` and just mark the step. */
+export type IrreversibleAction = 'ask' | 'deny' | 'allow'
+
 export type IrreversibleRule =
-  | { net: { host: string; method?: string; path?: string } }
-  | { shell: string[] }
+  | { net: { host: string; method?: string; path?: string }; action?: IrreversibleAction }
+  | { shell: string[]; action?: IrreversibleAction }

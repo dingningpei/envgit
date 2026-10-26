@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { fileURLToPath } from 'node:url'
-import { compileSrt, matchIrreversible } from '../src/core/policy/compile.js'
+import { compileSrt } from '../src/core/policy/compile.js'
+import { Gate } from '../src/core/policy/gate.js'
 import { loadPolicy } from '../src/core/policy/load.js'
 import { shellQuote } from '../src/core/env/srt.js'
 
@@ -26,13 +27,28 @@ describe('compileSrt', () => {
   })
 })
 
-describe('matchIrreversible', () => {
-  const policy = { irreversible: [{ shell: ['git push', 'npm publish'] }] }
-  it('matches on word boundaries', () => {
-    expect(matchIrreversible(policy, ['git', 'push', 'origin'])).toBe('shell: git push')
-    expect(matchIrreversible(policy, ['npm', 'publish'])).toBe('shell: npm publish')
-    expect(matchIrreversible(policy, ['git', 'pushx'])).toBeUndefined()
-    expect(matchIrreversible(policy, ['git', 'status'])).toBeUndefined()
+describe('compileSrt and the gate', () => {
+  it('terminates TLS and filters requests only when there are request rules and a gate', () => {
+    const withNet = { irreversible: [{ net: { host: 'github.com', method: 'POST' } }] }
+    const gate = new Gate(withNet)
+    const c = compileSrt(withNet, gate)
+    expect(c.network.tlsTerminate).toEqual({})
+    expect(c.network.filterRequest).toBe(gate.filterRequest)
+    expect(c.network.ambiguousRequestTarget).toBe('refuse')
+    expect(compileSrt(withNet).network.tlsTerminate).toBeUndefined()
+    const shellOnly = { irreversible: [{ shell: ['git push'] }] }
+    expect(compileSrt(shellOnly, new Gate(shellOnly)).network.filterRequest).toBeUndefined()
+    const pinned = { ...withNet, network: { noInspect: ['pinned.example.com'] } }
+    expect(compileSrt(pinned, new Gate(pinned)).network.tlsTerminate).toEqual({ excludeDomains: ['pinned.example.com'] })
+  })
+
+  it('rejects an unknown irreversible action', async () => {
+    const { mkdtemp, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const f = join(await mkdtemp(join(tmpdir(), 'envgit-pol-')), 'p.yaml')
+    await writeFile(f, 'irreversible:\n  - shell: ["git push"]\n    action: alow\n')
+    await expect(loadPolicy(f)).rejects.toThrow(/must be ask, deny or allow/)
   })
 })
 

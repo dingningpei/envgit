@@ -39,6 +39,8 @@ Early. See [`docs/design.md`](docs/design.md) for the plan.
 
 - **M2.5 (macOS, vm backend)** — `backend: vm` in the policy runs commands inside a Firecracker guest nested in a Virtualization-framework microVM, and every step is a Firecracker diff snapshot: `envgit rewind` brings back files **and running processes**. `envgit vm up` boots it (and imports the workdir), the host workdir becomes a read-only mirror synced after every step (host edits that were not pushed are kept and reported, never overwritten), and `envgit vm push <path>` sends host edits in as a step. Snapshots are stored on the host in `.envgit/vm/snaps`, so `envgit vm down` loses nothing: `vm up` resumes the session with its processes, `rewind` works while the VM is down, and `envgit fork` works on vm sessions too. Needs an M3+ Mac on macOS 15+ and `scripts/vm/build.sh` (downloads pinned kernels/Firecracker into `~/.cache/envgit/vm`). See [design §3.6](docs/design.md) and the [spike](docs/spike-nested-firecracker.md).
 
+- **M3 (gating)** — irreversible actions are gated, not just logged. With request rules in the policy, the sandbox proxy terminates TLS and judges every HTTP(S) request: `network.l7` denies what it does not list, and an `irreversible` rule (`git push` over HTTPS, `npm publish`, a POST to an API) either asks — at the terminal for `envgit run`, through MCP elicitation for `envgit mcp` — or is denied / allowed outright per its `action`. With no one to ask, `ask` denies. The decision is recorded on the step, and `log` / `rewind` show which steps reached outside. See [design §4](docs/design.md).
+
 ```bash
 npm install && npm run build
 cd your-project && node /path/to/envgit/dist/cli/index.js init

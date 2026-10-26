@@ -65,8 +65,10 @@ capabilities:            # what the REPL exposes as functions
   github: [listIssues, getIssue]
   fs:     true
   shell:  false
-irreversible:            # gated: require approval, always logged red
-  - net: { host: "github.com", method: POST, path: "/repos/*/git/*" }
+irreversible:            # gated (§4): ask (default) / deny / allow, always logged red
+  - net: { host: "github.com", method: POST, path: "/**/git-receive-pack" }   # git push
+  - net: { host: "registry.npmjs.org", method: PUT }                          # npm publish
+    action: deny
   - shell: ["git push", "npm publish"]
 ```
 
@@ -194,13 +196,39 @@ Effects are classified at policy-compile time and confirmed at runtime by the pr
 
 The product promise is *audit + gate + in-sandbox rewind*, not a time machine.
 
+**Gating on srt** (`src/core/policy/gate.ts`). srt already funnels all sandbox traffic through its
+proxy; when the policy has request-level rules (`network.l7`, or an `irreversible` net rule) envgit
+turns on srt's TLS termination — a per-run CA that srt makes trusted inside the sandbox through
+`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO` and friends — and its
+`filterRequest` hook, so every HTTP(S) request reaches the gate with method, canonical host and
+normalized path (ambiguous spellings like `/a/../b` are refused). Checked with curl, Node `fetch`
+(envgit sets `NODE_USE_ENV_PROXY=1`), Python `urllib` and git over HTTPS.
+
+- `network.l7` denies what it does not list for a host; then the first matching `irreversible` net
+  rule applies its `action`: `allow` lets it out and marks the step, `deny` refuses it with a 403
+  whose body says why (so the agent can tell policy from failure), `ask` (default) holds the request
+  while a person decides. No answer, a decline, or a failing prompt all deny — the gate fails closed.
+- Who is asked: `envgit run` prompts on `/dev/tty` (not stdin, which the command inherits; 2-minute
+  timeout); `envgit mcp` asks the client through MCP elicitation when it supports it (Claude Code shows
+  a dialog in interactive sessions); with neither, `ask` denies and the reason says how to allow the
+  rule on purpose. A held request is a waiting HTTP call — most clients wait, some (npm) time out.
+  The REPL's per-step timeout does not run out while a person is being asked.
+- Each judged request is a `net` effect on the step with `irreversible: { rule, decision }`; a step
+  where an irreversible request actually went out gets the step-level `irreversible` marker that
+  `log` shows and `rewind` warns about.
+- Shell rules are judged the same way before the command starts (a denied one never runs). They only
+  see the command line envgit was given, so `sh -c 'git push'` gets past them — the net rule is the
+  enforcement, the shell rule is an early, readable stop.
+- `network.noInspect` lists hosts left as opaque tunnels (certificate pinning, mTLS); request rules
+  cannot see their HTTPS traffic. The vm backend has no network in L2 yet, so only shell rules apply there.
+
 ## 5. Milestones
 
 1. **M0** — `envgit init` / policy file / `envgit run <cmd>` on the srt backend with an action log.
 2. **M1** — REPL with persistent state and capability injection, exposed as an MCP server. Demo ([`demo-m1.md`](demo-m1.md)): 1.6× fewer context tokens on a 48 KB task, 9.4× (3.8× cost) on a 380 KB task where per-capability tools hit Claude Code's result-size limit and got the answer wrong.
 3. **M2** — per-step snapshots; `envgit log`, `envgit fork <step>`, `envgit rewind <step>`. Done first on srt with fs-level snapshots (below), because Firecracker needs Linux + KVM; the Firecracker backend moves to M2.5.
    - **M2.5** — Firecracker backend (Linux + KVM): full memory + disk snapshots behind the same `log` / `fork` / `rewind`.
-4. **M3** — Codex self-hosted environment adapter; irreversible-action gating through the egress proxy.
+4. **M3** — irreversible-action gating through the egress proxy (done on srt, §4); Codex self-hosted environment adapter.
 5. **M4** — Apple Virtualization backend; web UI timeline.
 
 ## 6. Prior art

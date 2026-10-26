@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmSnapshotExists, vmUp, type MirrorResult } from '../core/env/vm.js'
-import { matchIrreversible } from '../core/policy/compile.js'
+import { Gate, irreversibleOf } from '../core/policy/gate.js'
+import { ttyApprover } from './approve.js'
 import { loadPolicy } from '../core/policy/load.js'
 import type { Policy } from '../core/policy/schema.js'
 import {
@@ -51,7 +52,12 @@ const help = `envgit — version control for agent execution environments
   envgit vm push <path...>       copy host edits into the VM, recorded as a step
 
 Snapshots are fs-level on srt: files only, not memory or processes. Restart
-\`envgit mcp\` after a rewind.`
+\`envgit mcp\` after a rewind.
+
+Irreversible actions (policy \`irreversible:\`) are gated: HTTP requests through the
+sandbox proxy (TLS-terminated when the policy has request rules) and matching
+command lines. \`action: ask\` (default) asks at the terminal, or the MCP client
+via elicitation, and denies when no one can be asked; \`deny\` / \`allow\` skip asking.`
 
 const ROOT = join(process.cwd(), '.envgit')
 const POLICY = join(ROOT, 'policy.yaml')
@@ -87,22 +93,27 @@ async function run(argv: string[]): Promise<number> {
     return 2
   }
   const policy = await requireInit()
-  if (policy.backend === 'vm') return runVm(argv, policy)
+  const gate = terminalGate(policy)
+  const shell = await gate.checkShell(argv)
+  if (shell.refused) {
+    console.error(red(shell.refused))
+    return 1
+  }
+  if (policy.backend === 'vm') return runVm(argv, policy, shell.irreversible)
   const backend = new SrtBackend()
   const session = await openSession(ROOT, backend.name)
-  const irreversible = matchIrreversible(policy, argv)
-  if (irreversible) console.error(red(`envgit: irreversible action (${irreversible}) — not gated in M0, logging only`))
 
   const snap = snapshotting(policy)
   await acquireBusy(ROOT)
   await ensureBase(session, snap)
-  const env = await backend.create({ workdir: process.cwd(), policy, snapshots: snap })
+  const env = await backend.create({ workdir: process.cwd(), policy, snapshots: snap, gate })
   const ac = new AbortController()
   const onSigint = () => ac.abort()
   process.on('SIGINT', onSigint)
   try {
     const startedAt = new Date().toISOString()
     const result = await backend.exec(env, { argv }, ac.signal)
+    const irreversible = shell.irreversible ?? irreversibleOf(result.effects)
     const step = await recordStep(session, snap, {
       startedAt,
       endedAt: new Date().toISOString(),
@@ -113,6 +124,8 @@ async function run(argv: string[]): Promise<number> {
     })
     for (const e of result.effects) {
       if (e.kind === 'policy' && RELEVANT_DENIAL.test(e.reason)) console.error(red(`envgit: denied ${e.reason}`))
+      if (e.kind === 'net' && e.denied) console.error(red(`envgit: denied ${e.method} ${e.host}${e.path ?? ''}${e.irreversible ? ` (${e.irreversible.rule})` : ' (network.l7)'}`))
+      if (e.kind === 'net' && e.irreversible && !e.denied) console.error(red(`envgit: irreversible ${e.method} ${e.host}${e.path ?? ''} went out (${e.irreversible.rule}, ${e.irreversible.decision})`))
     }
     console.error(`envgit: step ${step.index} recorded in session ${session.meta.id}`)
     return result.exitCode
@@ -123,6 +136,12 @@ async function run(argv: string[]): Promise<number> {
   }
 }
 
+/** A gate that asks at the terminal when there is one; otherwise `ask` rules deny. */
+function terminalGate(policy: Policy): Gate {
+  const tty = ttyApprover()
+  return tty ? new Gate(policy, tty, 'the terminal') : new Gate(policy)
+}
+
 async function mcp(mode: 'repl' | 'tools'): Promise<number> {
   // stdout carries JSON-RPC; keep every diagnostic on stderr.
   console.log = console.error
@@ -130,10 +149,12 @@ async function mcp(mode: 'repl' | 'tools'): Promise<number> {
   const backend = new SrtBackend()
   const session = await openSession(ROOT, backend.name)
   const snap = snapshotting(policy)
-  const env = await backend.create({ workdir: process.cwd(), policy, snapshots: snap })
+  // stdin is the MCP transport, so approval goes through the client (elicitation) once it connects.
+  const gate = new Gate(policy, undefined, 'no MCP client that can ask (elicitation)')
+  const env = await backend.create({ workdir: process.cwd(), policy, snapshots: snap, gate })
   const repl = new ReplSession(backend, env, policy, session, snap)
   try {
-    await serveMcp(repl, policy, process.cwd(), mode)
+    await serveMcp(repl, policy, process.cwd(), mode, gate)
     return 0
   } finally {
     await repl.close()
@@ -396,12 +417,11 @@ async function vmSession(): Promise<OpenSession> {
   return session
 }
 
-async function runVm(argv: string[], policy: Policy): Promise<number> {
+/** L2 has no network, so only shell rules apply here (checked by the caller). */
+async function runVm(argv: string[], policy: Policy, irreversible?: string): Promise<number> {
   const session = await vmSession()
   const vm = new VmBackend()
   const env = await vm.create({ workdir: process.cwd() })
-  const irreversible = matchIrreversible(policy, argv)
-  if (irreversible) console.error(red(`envgit: irreversible action (${irreversible}) — not gated yet, logging only`))
   await acquireBusy(ROOT)
   try {
     const startedAt = new Date().toISOString()

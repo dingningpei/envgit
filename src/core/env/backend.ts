@@ -1,6 +1,7 @@
 /** Environment backend contract. See docs/design.md §3.1 */
 import type { Policy } from '../policy/schema.js'
 import type { SnapshotStore } from '../snapshot/store.js'
+import type { Gate } from '../policy/gate.js'
 
 export type SnapshotId = string & { readonly __brand: 'SnapshotId' }
 
@@ -10,6 +11,8 @@ export interface EnvSpec {
   policy?: Policy
   /** Where fs-level snapshots go, for backends without native ones. */
   snapshots?: { store: SnapshotStore; exclude: string[] }
+  /** Judges each HTTP request (and asks a person when a rule says so). */
+  gate?: Gate
 }
 
 export interface Env {
@@ -32,7 +35,16 @@ export interface ExecResult {
 
 export type Effect =
   | { kind: 'fs'; op: 'read' | 'write' | 'delete'; path: string; denied?: boolean }
-  | { kind: 'net'; host: string; port: number; method?: string; path?: string; denied?: boolean }
+  | {
+      kind: 'net'
+      host: string
+      port: number
+      method?: string
+      path?: string
+      denied?: boolean
+      /** Matched an irreversible rule, and what became of it. */
+      irreversible?: { rule: string; decision: 'approved' | 'denied' | 'allowed' }
+    }
   | { kind: 'proc'; argv: string[] }
   | { kind: 'policy'; denied: true; reason: string }
 
