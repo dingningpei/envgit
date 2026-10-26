@@ -123,6 +123,7 @@ export async function vmUp(workdir: string, opts: { cpus?: number; mem?: number;
   child.unref()
   await log.close()
   await writeFile(join(p.state, 'helper.pid'), `${child.pid}\n`)
+  await writeFile(join(p.state, 'helper.stamp'), `${await vmBuildStamp()}\n`)
   const deadline = Date.now() + 120_000
   while (Date.now() < deadline) {
     if (await client.alive()) return true
@@ -130,6 +131,19 @@ export async function vmUp(workdir: string, opts: { cpus?: number; mem?: number;
     await new Promise(r => setTimeout(r, 500))
   }
   throw new Error(`vm: L1 did not come up; see ${join(p.state, 'console.log')}`)
+}
+
+/** Identifies the build in `scripts/vm/build.sh`'s output; empty for a build from before stamps. */
+export async function vmBuildStamp(): Promise<string> {
+  return (await readFile(join(vmDir(), 'build', 'stamp'), 'utf8').catch(() => '')).trim()
+}
+
+/** Whether a VM is running here that was booted from a different build than the current one. */
+export async function vmStale(workdir: string): Promise<boolean> {
+  const p = vmPaths(workdir)
+  if (!(await new VmClient(p.socket).alive())) return false
+  const running = (await readFile(join(p.state, 'helper.stamp'), 'utf8').catch(() => '')).trim()
+  return running !== (await vmBuildStamp())
 }
 
 export async function vmDown(workdir: string): Promise<boolean> {

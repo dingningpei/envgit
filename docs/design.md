@@ -133,6 +133,10 @@ envgit (TS) ──unix socket── envgit-vm (Swift, Virtualization.framework) 
   the snapshots on the host) or, with no such session or `--new`, boots a fresh L2 and imports the
   workdir; `envgit vm down` stops both and loses nothing. `rewind` boots the VM itself if it is down.
   `run` against a live VM costs one exec round trip, one diff snapshot and an incremental mirror sync.
+  `scripts/vm/build.sh` writes a stamp of its output and `vm up` records the stamp it booted; when
+  they differ (a rebuild since), `vm up`, `run` and `push` checkpoint the guest as a step (`ckpt` in
+  the log: background processes may have moved on since the last step), stop the VM, boot the new
+  build and restore that checkpoint (≈ 2 s); `rewind` just restarts, since it replaces the state anyway.
 - **L1** is the Ubuntu arm64 generic kernel with an initramfs holding our Go supervisor, Firecracker,
   `rebase-snap`, the L2 kernel/rootfs, and the vsock + virtiofs modules taken from the matching
   `linux-modules` package (the same approach Claude's desktop VM takes). No disk, no network; one

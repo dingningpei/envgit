@@ -9,7 +9,8 @@ export interface Step {
   index: number
   startedAt: string
   endedAt: string
-  action: { type: 'exec' | 'repl' | 'push'; input: string }
+  /** `checkpoint`: envgit saved the guest's state itself (e.g. before restarting the VM), no command ran. */
+  action: { type: 'exec' | 'repl' | 'push' | 'checkpoint'; input: string }
   exitCode: number
   effects: Effect[]
   irreversible?: { reason: string }

@@ -3,6 +3,7 @@
 #   build/envgit-vm         Swift helper (Virtualization.framework), ad-hoc signed
 #   build/Image             L1 kernel (Ubuntu generic, uncompressed)
 #   build/l1-initrd.cpio    L1 supervisor + Firecracker + L2 kernel/rootfs/initrd + vsock/virtiofs modules
+#   build/stamp             hash of the three above; a VM booted from another build is restarted
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -52,4 +53,5 @@ for m in net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common net
   zstd -qdf "$WORK/deb/lib/modules/$KVER/kernel/$m.ko.zst" -o "$WORK/l1root/modules/$(basename $m).ko"
 done
 (cd "$WORK/l1root" && find . | cpio -o -H newc 2>/dev/null) > "$OUT/l1-initrd.cpio"
+(cd "$OUT" && cat envgit-vm Image l1-initrd.cpio | shasum -a 256 | cut -c1-16) > "$OUT/stamp"
 ls -la "$OUT"

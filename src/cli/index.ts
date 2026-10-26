@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { startEgress, type Egress } from '../core/env/vm-egress.js'
-import { copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmSnapshotExists, vmUp, type MirrorResult } from '../core/env/vm.js'
+import { copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmSnapshotExists, vmStale, vmUp, type MirrorResult } from '../core/env/vm.js'
 import { Gate, irreversibleOf } from '../core/policy/gate.js'
 import { ttyApprover } from './approve.js'
 import { loadPolicy } from '../core/policy/load.js'
@@ -242,7 +242,7 @@ async function log(): Promise<number> {
     const cols = [
       String(st.index).padStart(5),
       st.startedAt.slice(11, 19),
-      st.action.type.padEnd(4),
+      (st.action.type === 'checkpoint' ? 'ckpt' : st.action.type).padEnd(4),
       `exit ${st.exitCode}`.padEnd(7),
       short(st.snapshot),
       (input.length > 60 ? input.slice(0, 59) + '…' : input).padEnd(60),
@@ -270,6 +270,8 @@ async function rewind(args: string[]): Promise<number> {
     console.error(`envgit: a step is running here (pid ${busy}); wait for it to finish`)
     return 1
   }
+  // Rewinding replaces the guest's state anyway; only make sure it lands in a VM on the current build.
+  if (session.meta.backend === 'vm' && (await vmStale(process.cwd()))) await vmDown(process.cwd())
   const head = await readHead(session.dir)
   const headId = await snapshotOf(session, head)
   // On vm the guest owns the files and keeps running between steps, so there is no host-side drift to check.
@@ -409,16 +411,67 @@ async function recordVmStep(session: OpenSession, policy: Policy, vm: VmBackend,
   return { step, mirror: m }
 }
 
+/**
+ * A VM booted from an older build (scripts/vm/build.sh ran since) lacks whatever changed in L1/L2.
+ * Checkpoint its guest as a step — background processes may have moved on since the last one — stop
+ * it, and boot the current build at that checkpoint. Snapshots are on the host, so nothing is lost.
+ */
+async function restartIfStale(policy: Policy): Promise<boolean> {
+  const workdir = process.cwd()
+  if (!(await vmStale(workdir))) return false
+  const busy = await busyHolder(ROOT)
+  if (busy !== undefined) throw new Error(`vm: the running VM is from an older build, but a step is running (pid ${busy}); retry when it finishes`)
+  const t0 = Date.now()
+  const session = await currentVmSession()
+  const status = await new VmClient(vmPaths(workdir).socket).call({ op: 'status' }).catch(() => undefined)
+  let at: SnapshotId | undefined
+  if (session && status?.msg.current) {
+    const vm = new VmBackend()
+    await vm.create({ workdir })
+    await acquireBusy(ROOT)
+    try {
+      const { step } = await recordVmStep(session, policy, vm, {
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        action: { type: 'checkpoint', input: 'before restarting the VM on a new build' },
+        exitCode: 0,
+        effects: [],
+      })
+      at = step.snapshot
+    } finally {
+      await releaseBusy(ROOT)
+    }
+  }
+  await vmDown(workdir)
+  if (!session || !at) {
+    console.error('envgit: stopped a VM from an older build')
+    return true
+  }
+  await vmUp(workdir)
+  const vm = new VmBackend()
+  await vm.create({ workdir })
+  await vm.restore(at)
+  reportMirror(await vm.syncMirror())
+  console.error(`envgit: restarted the VM on the current build in ${((Date.now() - t0) / 1000).toFixed(1)}s, resumed at a checkpoint of session ${session.meta.id}`)
+  return true
+}
+
 async function currentVmSession(): Promise<OpenSession | undefined> {
   if (!(await exists(join(ROOT, 'current')))) return undefined
   const session = await openSession(ROOT, 'vm')
   return session.meta.backend === 'vm' && session.meta.base ? session : undefined
 }
 
-async function vmSession(): Promise<OpenSession> {
+async function vmClientAlive(workdir: string): Promise<boolean> {
+  return new VmClient(vmPaths(workdir).socket).alive()
+}
+
+/** The current vm session, with the VM on the current build (see restartIfStale). */
+async function vmSession(policy: Policy): Promise<OpenSession> {
   if (!(await exists(join(ROOT, 'current')))) throw new Error('no vm session here — run `envgit vm up`')
   const session = await openSession(ROOT, 'vm')
   if (session.meta.backend !== 'vm') throw new Error('the current session is not a vm session — run `envgit vm up`')
+  await restartIfStale(policy)
   return session
 }
 
@@ -427,7 +480,7 @@ async function vmSession(): Promise<OpenSession> {
  * any host: srt's proxy with the allowlist and the same gate as on srt. Shell rules were checked by the caller.
  */
 async function runVm(argv: string[], policy: Policy, gate: Gate, shellIrreversible?: string): Promise<number> {
-  const session = await vmSession()
+  const session = await vmSession(policy)
   const vm = new VmBackend()
   const env = await vm.create({ workdir: process.cwd() })
   await acquireBusy(ROOT)
@@ -466,8 +519,10 @@ async function vmCmd(args: string[]): Promise<number> {
   switch (args[0]) {
     case 'up': {
       const t0 = Date.now()
+      if (!args.includes('--new') && (await restartIfStale(policy)) && (await vmClientAlive(workdir))) return 0
       const current = args.includes('--new') ? undefined : await currentVmSession()
       const resumeAt = current && (await snapshotOf(current, await readHead(current.dir)))
+      if (args.includes('--new') && (await vmStale(workdir))) await vmDown(workdir)
       if (!(await vmUp(workdir))) {
         console.error('envgit: vm is already running here')
         return 0
@@ -508,7 +563,7 @@ async function vmCmd(args: string[]): Promise<number> {
     case 'push': {
       const paths = args.slice(1)
       if (!paths.length) throw new Error('usage: envgit vm push <path...>')
-      const session = await vmSession()
+      const session = await vmSession(policy)
       const vm = new VmBackend()
       await vm.create({ workdir })
       await acquireBusy(ROOT)

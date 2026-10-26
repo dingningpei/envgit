@@ -151,4 +151,19 @@ irreversible:
       server.close()
     }
   }, 120_000)
+
+  it('restarts a VM booted from an older build onto a checkpoint, losing nothing', async () => {
+    await envgit('run', 'sh', '-c', 'echo before > restart.txt')
+    const before = Number((await envgit('run', 'cat', 'counter')).stdout)
+    await sleep(2000)
+    // As if scripts/vm/build.sh had run since this VM booted.
+    await writeFile(join(dir, '.envgit/vm/helper.stamp'), 'an-older-build\n')
+    const r = await envgit('run', 'cat', 'counter')
+    expect(r.stderr).toMatch(/restarted the VM on the current build/)
+    // The checkpoint caught the counter's progress since the last step, and the loop still runs.
+    expect(Number(r.stdout)).toBeGreaterThan(before)
+    expect((await envgit('log')).stdout).toMatch(/ckpt {2}exit 0 .*before restarting the VM/)
+    expect((await envgit('run', 'cat', 'restart.txt')).stdout).toBe('before\n')
+    expect((await envgit('vm', 'up')).stderr).toMatch(/already running/)
+  }, 120_000)
 })
