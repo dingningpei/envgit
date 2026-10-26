@@ -2,7 +2,7 @@
 # Builds the VM backend artifacts (docs/design.md §3.6) from the pinned downloads:
 #   build/envgit-vm         Swift helper (Virtualization.framework), ad-hoc signed
 #   build/Image             L1 kernel (Ubuntu generic, uncompressed)
-#   build/l1-initrd.cpio    L1 supervisor + Firecracker + L2 kernel/rootfs/initrd + vsock modules
+#   build/l1-initrd.cpio    L1 supervisor + Firecracker + L2 kernel/rootfs/initrd + vsock/virtiofs modules
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -32,11 +32,12 @@ rm -rf "$WORK/l2root" && mkdir -p "$WORK/l2root/dev" "$WORK/l2root/proc" "$WORK/
 cp "$WORK/l2-init" "$WORK/l2root/init"
 (cd "$WORK/l2root" && find . | cpio -o -H newc 2>/dev/null) > "$WORK/l2-initrd.cpio"
 
-echo "vsock modules"
+echo "vsock + virtiofs modules"
 rm -rf "$WORK/deb" && mkdir -p "$WORK/deb" && (cd "$WORK/deb" && ar x "$DL/linux-modules-${KVER}_arm64.deb" \
   && tar -xf data.tar "./lib/modules/$KVER/kernel/net/vmw_vsock/vsock.ko.zst" \
      "./lib/modules/$KVER/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.zst" \
-     "./lib/modules/$KVER/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko.zst")
+     "./lib/modules/$KVER/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko.zst" \
+     "./lib/modules/$KVER/kernel/fs/fuse/virtiofs.ko.zst")
 
 echo "L1 initrd"
 rm -rf "$WORK/l1root" && mkdir -p "$WORK/l1root/fc" "$WORK/l1root/modules" "$WORK/l1root/dev" "$WORK/l1root/proc" "$WORK/l1root/sys" "$WORK/l1root/tmp"
@@ -47,8 +48,8 @@ cp "$WORK/fc/release-v1.17.0-aarch64/rebase-snap-v1.17.0-aarch64" "$WORK/l1root/
 cp "$DL/vmlinux-6.18.54" "$WORK/l1root/fc/vmlinux"
 cp "$DL/ubuntu-24.04.squashfs" "$WORK/l1root/fc/rootfs.squashfs"
 cp "$WORK/l2-initrd.cpio" "$WORK/l1root/fc/l2-initrd.cpio"
-for m in vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport; do
-  zstd -qdf "$WORK/deb/lib/modules/$KVER/kernel/net/vmw_vsock/$m.ko.zst" -o "$WORK/l1root/modules/$m.ko"
+for m in net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common net/vmw_vsock/vmw_vsock_virtio_transport fs/fuse/virtiofs; do
+  zstd -qdf "$WORK/deb/lib/modules/$KVER/kernel/$m.ko.zst" -o "$WORK/l1root/modules/$(basename $m).ko"
 done
 (cd "$WORK/l1root" && find . | cpio -o -H newc 2>/dev/null) > "$OUT/l1-initrd.cpio"
 ls -la "$OUT"

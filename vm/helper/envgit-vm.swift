@@ -1,9 +1,10 @@
 // envgit-vm: boots the L1 microVM (docs/design.md §3.6) and bridges a host unix socket to the
 // L1 supervisor on vsock port 1024 — one vsock connection per accepted socket connection.
 //
-//   envgit-vm --kernel Image --initrd l1-initrd.cpio --socket path [--cpus 4] [--mem 4096] [--l2mem 1024]
+//   envgit-vm --kernel Image --initrd l1-initrd.cpio --socket path --share dir [--cpus 4] [--mem 4096] [--l2mem 1024]
 //
-// The L1 console goes to stdout. The process exits when the guest stops.
+// `dir` (the workdir's .envgit/vm/snaps) is shared into L1 over virtiofs with tag "envgit"; L1 writes
+// every snapshot there. The L1 console goes to stdout. The process exits when the guest stops.
 import Foundation
 import Virtualization
 
@@ -15,8 +16,9 @@ while let a = it.next() { if a.hasPrefix("--"), let v = it.next() { opts[a] = v 
 let kernel = opts["--kernel"] ?? ""
 let initrd = opts["--initrd"] ?? ""
 let socketPath = opts["--socket"] ?? ""
-if kernel.isEmpty || initrd.isEmpty || socketPath.isEmpty {
-  log("usage: envgit-vm --kernel K --initrd I --socket S [--cpus N] [--mem MiB] [--l2mem MiB]")
+let sharePath = opts["--share"] ?? ""
+if kernel.isEmpty || initrd.isEmpty || socketPath.isEmpty || sharePath.isEmpty {
+  log("usage: envgit-vm --kernel K --initrd I --socket S --share DIR [--cpus N] [--mem MiB] [--l2mem MiB]")
   exit(2)
 }
 
@@ -41,6 +43,9 @@ console.attachment = VZFileHandleSerialPortAttachment(
 config.serialPorts = [console]
 config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
 config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+let share = VZVirtioFileSystemDeviceConfiguration(tag: "envgit")
+share.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: sharePath), readOnly: false))
+config.directorySharingDevices = [share]
 do { try config.validate() } catch { log("config: \(error)"); exit(1) }
 
 final class Delegate: NSObject, VZVirtualMachineDelegate {

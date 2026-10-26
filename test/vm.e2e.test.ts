@@ -65,4 +65,51 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1')('vm backend (e2e, ENVGIT_VM_E
     expect((await envgit('run', 'cat', 'notes.txt')).stdout).toBe('edited on host\n')
     expect((await envgit('log')).stdout).toMatch(/push {2}exit 0 .*\["notes.txt"\]/)
   }, 60_000)
+
+  it('records the files a step wrote and deleted as fs effects', async () => {
+    await envgit('run', 'sh', '-c', 'echo e > effect.txt; rm -f later.txt')
+    const session = (await readFile(join(dir, '.envgit/current'), 'utf8')).trim()
+    const steps = (await readFile(join(dir, '.envgit/sessions', session, 'steps.jsonl'), 'utf8')).trim().split('\n')
+    const effects = JSON.parse(steps.at(-1)!).effects as { kind: string; op: string; path: string }[]
+    expect(effects).toContainEqual({ kind: 'fs', op: 'write', path: 'effect.txt' })
+  }, 60_000)
+
+  it('keeps snapshots on the host: resumes after vm down, rewinds while down', async () => {
+    await envgit('run', 'sh', '-c', 'echo kept > kept.txt')
+    const head = Number(/head: (\d+)/.exec((await envgit('log')).stdout)![1])
+    const before = Number((await envgit('run', 'cat', 'counter')).stdout)
+    await envgit('run', 'sh', '-c', 'echo after > after.txt')
+    await envgit('vm', 'down')
+    const up = await envgit('vm', 'up')
+    expect(up.stderr).toMatch(/resumed session \S+ at step \d+/)
+    // The background counter from an earlier step is still running after a cold resume.
+    const resumed = Number((await envgit('run', 'cat', 'counter')).stdout)
+    expect(resumed).toBeGreaterThan(before)
+    await sleep(2000)
+    expect(Number((await envgit('run', 'cat', 'counter')).stdout)).toBeGreaterThan(resumed)
+
+    await envgit('vm', 'down')
+    expect((await envgit('rewind', String(head))).stderr).toMatch(/rewound to step/)
+    expect(await readFile(join(dir, 'kept.txt'), 'utf8')).toBe('kept\n')
+    await expect(readFile(join(dir, 'after.txt'))).rejects.toThrow()
+    expect((await envgit('vm', 'status')).stdout).toMatch(/vm: running/)
+  }, 180_000)
+
+  it('forks a step into a new directory that resumes with its processes', async () => {
+    const head = (/head: (\d+)/.exec((await envgit('log')).stdout)![1])
+    const target = `${dir}-fork`
+    const f = await envgit('fork', head, target)
+    expect(f.stderr).toMatch(/forked step \d+ into/)
+    expect(await readFile(join(target, 'kept.txt'), 'utf8')).toBe('kept\n')
+    const sub = (...args: string[]) =>
+      run(process.execPath, [CLI, ...args], { cwd: target }).catch((e: { code: number; stdout: string; stderr: string }) => e)
+    try {
+      expect((await sub('vm', 'up')).stderr).toMatch(/resumed session/)
+      const a = Number((await sub('run', 'cat', 'counter')).stdout)
+      await sleep(2000)
+      expect(Number((await sub('run', 'cat', 'counter')).stdout)).toBeGreaterThan(a)
+    } finally {
+      await sub('vm', 'down')
+    }
+  }, 180_000)
 })

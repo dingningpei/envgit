@@ -127,36 +127,63 @@ envgit (TS) ──unix socket── envgit-vm (Swift, Virtualization.framework) 
                                                                                      └── L2 agent (Go /init) → chroot into the CI rootfs
 ```
 
-- **Lifetime:** `envgit vm up` boots L1 and an L2 guest from a clean base and keeps both running;
-  `envgit vm down` stops them. `run` against a live VM costs one exec round trip plus one diff snapshot.
+- **Lifetime:** `envgit vm up` boots L1 and either resumes the current vm session at its head (from
+  the snapshots on the host) or, with no such session or `--new`, boots a fresh L2 and imports the
+  workdir; `envgit vm down` stops both and loses nothing. `rewind` boots the VM itself if it is down.
+  `run` against a live VM costs one exec round trip, one diff snapshot and an incremental mirror sync.
 - **L1** is the Ubuntu arm64 generic kernel with an initramfs holding our Go supervisor, Firecracker,
-  `rebase-snap`, the L2 kernel/rootfs, and the vsock modules taken from the matching
-  `linux-modules` package (the same approach Claude's desktop VM takes). No disk, no network.
+  `rebase-snap`, the L2 kernel/rootfs, and the vsock + virtiofs modules taken from the matching
+  `linux-modules` package (the same approach Claude's desktop VM takes). No disk, no network; one
+  virtiofs share, the workdir's `.envgit/vm/snaps`, where every snapshot goes.
 - **L2** boots the Firecracker CI kernel with our Go agent as its initrd. The agent mounts the
   read-only CI rootfs, a tmpfs at `/work`, and runs commands via `chroot` with `/work` as cwd. Child
   processes outlive the command that started them; the agent reaps them as PID 1.
 - **Workdir ownership:** while a VM session runs, files live in L2's `/work` (tmpfs, so the memory
   snapshot contains them — memory, processes and files are one consistent unit). The host workdir is
   a read-only mirror, synced from L2 after every step and after a rewind. Host edits go in through
-  `envgit vm push`, which is recorded as a step so it can be rewound. Later, `/work` moves to a
-  host-side disk image for capacity (APFS clone per snapshot, same ownership model).
+  `envgit vm push`, which is recorded as a step so it can be rewound. The mirror is not chmod'ed
+  read-only — that would get in the way of the edit-then-push workflow — instead it guards host
+  edits: `mirror.json` records the hash of every file it wrote, and a host file that no longer
+  matches (edited, or created, on the host and not pushed) is kept and reported as a conflict
+  rather than overwritten or deleted. Sync is incremental: the host sends the guest key (inode, size,
+  ctime, mode) of what it holds, L2 replies with its full listing and a tar of only the entries whose
+  key differs. The paths a step wrote or deleted in `/work` are recorded as its `fs` effects (at most
+1000 of each per step). Later,
+  `/work` moves to a host-side disk image for capacity (APFS clone per snapshot, same ownership model).
 - **Snapshots:** a full snapshot of the base after boot, then one Firecracker diff per step; the diff
   holds the pages dirtied since the previous snapshot or restore, so its size ≈ what the step wrote.
   A step's memory = base + the diffs along its `parent` chain, merged with `rebase-snap` at restore.
   vsock connections do not survive a snapshot load, so every request opens a new connection.
+- **Snapshots on the host:** L1 writes each snapshot to tmpfs, resumes the guest, then packs it into
+  `.envgit/vm/snaps/<id>/` (`meta.json` with parent and kind, `state`, and memory as `mem.idx` —
+  the data extents — plus `mem.dat`) before acknowledging it. Extents are explicit because in a diff a
+  hole means "page not in this diff", unlike a page written with zeros, and we do not rely on virtiofs
+  to keep holes; a full snapshot (written densely by Firecracker) also drops all-zero pages, which
+  shrinks the 1 GiB base to ~50 MB. L1 keeps only the current base memory in tmpfs as a cache (the
+sparse version, rebuilt from the packed copy);
+  restore reads the chain back from the host. So L1's RAM no longer grows with steps, `rewind` and
+  `vm up` work after `vm down`, `fork` clones the chain (APFS `clonefile`) into the new workdir and
+  boots once there to fill its mirror, and `envgit gc` deletes snapshots no step builds on (the
+  closure over `parent`, so a live diff keeps its ancestors).
 - **Protocol:** one framed protocol on both hops — a 4-byte length + JSON header, optionally followed
   by a byte stream (files, tar).
 - **Not portable:** Firecracker snapshots do not load on a different CPU model, so a snapshot taken on
   a Mac will not restore on a Linux server even though the backend code is the same.
-- **Measured (M3 Pro):** `vm up` ≈ 6 s (L2 boot ≈ 3.7 s + base snapshot + import); a step's diff
-  snapshot 8–15 ms for a few MB; `rewind` ≈ 0.6 s, mostly copying the base memory file before
-  folding diffs in (keeping merged files per chain would cut that).
+- **Measured (M3 Pro):** fresh `vm up` ≈ 6 s (L2 boot ≈ 3.7 s + base snapshot + import); resuming
+  after `vm down` ≈ 2 s; `envgit run true` ≈ 0.35 s end to end, its diff ≈ 2 MB; `rewind` on a live
+  VM ≈ 0.75 s, on a stopped one ≈ 2 s (L1 boot included).
+- **L2 overhead** (`scripts/vm/bench`, same Go binary on the host and in L2): CPU (sha256) +7 %,
+  syscalls ≈ native, but memory is the cost. A first write to a page after a snapshot traps for
+  dirty-page tracking, and under nesting that exit is expensive: faulting in 256 MB takes 1.3 s in L2
+  vs 12 ms on the host (≈ 20 µs a page); with pages already written since the last snapshot it is
+  83 ms; never-touched guest RAM is worse still (≈ 5 s, L1 and the host back it lazily). fork+exec is
+  3.5× native after a snapshot and 1.6× warm. Writing files in `/work` runs at ≈ 40–80 MB/s. So
+  steps that touch a lot of memory pay for it; options are fewer snapshots for such steps, or
+  Firecracker's mincore-based diffs without dirty tracking (bigger diffs, no write traps).
 - **Not yet:** L2 networking (M3, egress via a user-space stack like Claude's gVisor netstack), a full
-  rootfs with git/node (next milestone; Claude's read-only root + overlay is the template), L2 CPU
-  overhead measurement, streaming snapshots to the host so `rewind` works after `vm down` (today they
-  live in L1's RAM and vanish with it), `fork` and `envgit mcp` on this backend, fs/net effects in
-  the step log (L2 has no network, and its writes stay inside the snapshot), and the mirror is
-  read-only by convention only (files are not write-protected).
+  rootfs with git/node (Claude's read-only root + overlay is the template) and with it `envgit mcp`
+  on this backend (the REPL worker needs node in L2), net effects in the step log, and a cap on the
+  disk the snapshots take besides `envgit gc`.
 
 ## 4. Irreversibility
 

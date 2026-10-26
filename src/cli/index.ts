@@ -4,7 +4,7 @@ import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
-import { tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmUp } from '../core/env/vm.js'
+import { copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmSnapshotExists, vmUp, type MirrorResult } from '../core/env/vm.js'
 import { matchIrreversible } from '../core/policy/compile.js'
 import { loadPolicy } from '../core/policy/load.js'
 import type { Policy } from '../core/policy/schema.js'
@@ -27,7 +27,7 @@ import {
   type Snapshotting,
   type StepRef,
 } from '../core/snapshot/log.js'
-import type { SnapshotId } from '../core/env/backend.js'
+import type { Effect, SnapshotId } from '../core/env/backend.js'
 import { SnapshotStore } from '../core/snapshot/store.js'
 import { ReplSession } from '../repl/session.js'
 import { runWorker } from '../repl/worker.js'
@@ -45,7 +45,9 @@ const help = `envgit — version control for agent execution environments
   envgit fork <step|base> <dir>  materialize a step into a new directory with its own session
   envgit session [new]           print the current session, or start a new one
   envgit gc                      delete snapshots and blobs no session refers to
-  envgit vm up|down|status       start/stop the nested-Firecracker VM (policy backend: vm)
+  envgit vm up [--new]           start the nested-Firecracker VM (policy backend: vm), resuming
+                                 the current vm session at its head unless --new
+  envgit vm down|status          stop the VM (snapshots stay on disk) / show it
   envgit vm push <path...>       copy host edits into the VM, recorded as a step
 
 Snapshots are fs-level on srt: files only, not memory or processes. Restart
@@ -164,11 +166,13 @@ interface RestoreMarker {
 async function restoreTo(session: OpenSession, snap: Snapshotting, target: StepRef, snapshot: SnapshotId): Promise<void> {
   await writeFile(RESTORING, JSON.stringify({ session: session.meta.id, target, snapshot } satisfies RestoreMarker))
   if (session.meta.backend === 'vm') {
+    // Snapshots live on the host, so a stopped VM is simply booted again to restore into.
+    await vmUp(process.cwd())
     const vm = new VmBackend()
     await vm.create({ workdir: process.cwd() })
     await vm.restore(snapshot)
     await writeHead(session.dir, target)
-    await vm.syncMirror()
+    reportMirror(await vm.syncMirror())
   } else {
     await snap.store.restore(snap.workdir, snapshot, snap.exclude)
     await writeHead(session.dir, target)
@@ -182,10 +186,10 @@ async function recoverRestore(policy: Policy): Promise<void> {
   if (!text) return
   const m = JSON.parse(text) as RestoreMarker
   const session: OpenSession = { dir: join(ROOT, 'sessions', m.session), meta: JSON.parse(await readFile(join(ROOT, 'sessions', m.session, 'session.json'), 'utf8')) }
-  if (session.meta.backend === 'vm' && !(await new VmClient(vmPaths(process.cwd()).socket).alive())) {
-    // The snapshots it points at lived in the stopped VM; nothing can finish it.
+  if (session.meta.backend === 'vm' && !(await vmSnapshotExists(process.cwd(), m.snapshot))) {
+    // Its target is not on disk (taken before snapshots moved to the host, or deleted); nothing can finish it.
     await rm(RESTORING)
-    console.error('envgit: dropped an interrupted vm rewind: the VM is down and its snapshots are gone')
+    console.error('envgit: dropped an interrupted vm rewind: its snapshot is not on disk')
     return
   }
   await restoreTo(session, snapshotting(policy), m.target, m.snapshot)
@@ -234,9 +238,6 @@ async function rewind(args: string[]): Promise<number> {
   const snap = snapshotting(policy)
   const targetId = await snapshotOf(session, target)
   if (!targetId) throw new Error(`step ${target} has no snapshot`)
-  if (session.meta.backend === 'vm' && !(await new VmClient(vmPaths(process.cwd()).socket).alive())) {
-    throw new Error('vm: not running; snapshots of a vm session live in the VM until it stops')
-  }
 
   const busy = await busyHolder(ROOT)
   if (busy !== undefined) {
@@ -276,7 +277,6 @@ async function fork(args: string[]): Promise<number> {
   const session = await openSession(ROOT, 'srt')
   const id = await snapshotOf(session, target)
   if (!id) throw new Error(`step ${target} has no snapshot`)
-  if (session.meta.backend === 'vm') throw new Error('fork is not supported for vm sessions yet')
 
   // Built next to the target and renamed into place, so a fork is all or nothing. The temp name is
   // fixed, so a retry after a crash clears what the failed attempt left.
@@ -289,6 +289,7 @@ async function fork(args: string[]): Promise<number> {
   const root = join(tmp, '.envgit')
   await mkdir(join(root, 'sessions'), { recursive: true })
   await copyFile(POLICY, join(root, 'policy.yaml'))
+  if (session.meta.backend === 'vm') return forkVm(session, target, id, tmp, dir)
   const store = new SnapshotStore(root)
   await snapshotting(policy).store.copyTo(store, id)
   await store.restore(tmp, id, policy.snapshot?.exclude ?? [])
@@ -298,6 +299,31 @@ async function fork(args: string[]): Promise<number> {
   await writeMeta(forked)
   await rename(tmp, dir)
   console.error(`envgit: forked ${target === 'base' ? 'base' : `step ${target}`} into ${dir} (session ${forked.meta.id})`)
+  return 0
+}
+
+/** A vm fork gets the snapshot chain and a session at it, then boots once to fill its mirror. */
+async function forkVm(session: OpenSession, target: StepRef, id: SnapshotId, tmp: string, dir: string): Promise<number> {
+  await copyVmSnapshots(process.cwd(), tmp, id)
+  const forked = await createSession(join(tmp, '.envgit'), 'vm')
+  forked.meta.base = id
+  forked.meta.forkedFrom = { session: session.meta.id, step: target, snapshot: id }
+  await writeMeta(forked)
+  await rename(tmp, dir)
+  const label = target === 'base' ? 'base' : `step ${target}`
+  try {
+    await vmUp(dir)
+    const vm = new VmBackend()
+    await vm.create({ workdir: dir })
+    await vm.restore(id)
+    await vm.syncMirror()
+  } catch (e) {
+    console.error(`envgit: forked ${label} into ${dir} (session ${forked.meta.id}), but filling its files failed: ${e instanceof Error ? e.message : e}; run \`envgit vm up\` there`)
+    return 1
+  } finally {
+    await vmDown(dir)
+  }
+  console.error(`envgit: forked ${label} into ${dir} (session ${forked.meta.id}); \`envgit vm up\` there resumes it with memory and processes`)
   return 0
 }
 
@@ -319,13 +345,48 @@ async function gc(): Promise<number> {
   await requireInit()
   const live = await liveSnapshots(ROOT)
   const r = await new SnapshotStore(ROOT).gc(live)
+  const v = await gcVmSnapshots(process.cwd(), live)
   // Logical size: with APFS clones the disk space actually freed can be smaller.
-  console.log(`removed ${r.snapshots} snapshot(s), ${r.blobs} blob(s), ${r.tmp} leftover temp file(s), ${(r.bytes / 1e6).toFixed(1)} MB; kept ${live.size} snapshot(s) in use`)
+  console.log(`removed ${r.snapshots + v.snapshots} snapshot(s), ${r.blobs} blob(s), ${r.tmp} leftover temp file(s), ${((r.bytes + v.bytes) / 1e6).toFixed(1)} MB; kept ${live.size} snapshot(s) in use`)
   return 0
 }
 
 function vmSnapshotting(policy: Policy, vm: VmBackend): Snapshotting {
   return { ...snapshotting(policy), take: () => vm.snapshot() }
+}
+
+/** Per kind, so a step like `npm install` does not put tens of thousands of paths in the log. */
+const MAX_FS_EFFECTS = 1000
+
+/** What the step did to /work, as seen by comparing the guest with the previous sync. */
+function mirrorEffects(m: MirrorResult): Effect[] {
+  return [
+    ...m.changed.slice(0, MAX_FS_EFFECTS).map(path => ({ kind: 'fs', op: 'write', path }) as const),
+    ...m.deleted.slice(0, MAX_FS_EFFECTS).map(path => ({ kind: 'fs', op: 'delete', path }) as const),
+  ]
+}
+
+function reportMirror(m: MirrorResult): void {
+  if (m.refused) console.error(red(`envgit: mirror refused ${m.refused} path(s) that would resolve outside the workdir`))
+  if (m.conflicts.length) {
+    const shown = m.conflicts.slice(0, 5).join(', ') + (m.conflicts.length > 5 ? `, … (${m.conflicts.length})` : '')
+    console.error(red(`envgit: kept host edits not yet pushed to the VM: ${shown} — \`envgit vm push\` them, or delete them to take the VM's version`))
+  }
+}
+
+/** Snapshots the guest first, so the mirror and the step's effects describe the recorded state. */
+async function recordVmStep(session: OpenSession, policy: Policy, vm: VmBackend, partial: Parameters<typeof recordStep>[2]) {
+  const snapshot = await vm.snapshot()
+  const m = await vm.syncMirror()
+  reportMirror(m)
+  const step = await recordStep(session, { ...snapshotting(policy), take: async () => snapshot }, { ...partial, effects: [...partial.effects, ...mirrorEffects(m)] })
+  return { step, mirror: m }
+}
+
+async function currentVmSession(): Promise<OpenSession | undefined> {
+  if (!(await exists(join(ROOT, 'current')))) return undefined
+  const session = await openSession(ROOT, 'vm')
+  return session.meta.backend === 'vm' && session.meta.base ? session : undefined
 }
 
 async function vmSession(): Promise<OpenSession> {
@@ -345,7 +406,7 @@ async function runVm(argv: string[], policy: Policy): Promise<number> {
   try {
     const startedAt = new Date().toISOString()
     const result = await vm.exec(env, { argv })
-    const step = await recordStep(session, vmSnapshotting(policy, vm), {
+    const { step, mirror: m } = await recordVmStep(session, policy, vm, {
       startedAt,
       endedAt: new Date().toISOString(),
       action: { type: 'exec', input: JSON.stringify(argv) },
@@ -353,8 +414,6 @@ async function runVm(argv: string[], policy: Policy): Promise<number> {
       effects: result.effects,
       ...(irreversible && { irreversible: { reason: irreversible } }),
     })
-    const m = await vm.syncMirror()
-    if (m.refused) console.error(red(`envgit: mirror refused ${m.refused} path(s) that would resolve outside the workdir`))
     console.error(`envgit: step ${step.index} recorded in vm session ${session.meta.id}${m.written || m.removed ? ` (mirror: ${m.written} written, ${m.removed} removed)` : ''}`)
     return result.exitCode
   } finally {
@@ -368,12 +427,23 @@ async function vmCmd(args: string[]): Promise<number> {
   switch (args[0]) {
     case 'up': {
       const t0 = Date.now()
+      const current = args.includes('--new') ? undefined : await currentVmSession()
+      const resumeAt = current && (await snapshotOf(current, await readHead(current.dir)))
       if (!(await vmUp(workdir))) {
         console.error('envgit: vm is already running here')
         return 0
       }
       const vm = new VmBackend()
       await vm.create({ workdir })
+      if (current && resumeAt && (await vmSnapshotExists(workdir, resumeAt))) {
+        const head = await readHead(current.dir)
+        await vm.restore(resumeAt)
+        reportMirror(await vm.syncMirror())
+        console.error(`envgit: vm up in ${((Date.now() - t0) / 1000).toFixed(1)}s, resumed session ${current.meta.id} at ${head === 'base' ? 'base' : `step ${head}`}`)
+        return 0
+      }
+      if (current) console.error(`envgit: session ${current.meta.id} has no snapshot on disk to resume (it predates host-side snapshots); starting a new one`)
+      await vm.boot()
       await vm.importTar(await tarFrom(workdir, ['.'], policy.snapshot?.exclude ?? []))
       const session = await createSession(ROOT, 'vm')
       await ensureBase(session, vmSnapshotting(policy, vm))
@@ -384,7 +454,7 @@ async function vmCmd(args: string[]): Promise<number> {
       return 0
     }
     case 'down':
-      console.error((await vmDown(workdir)) ? 'envgit: vm stopped (its snapshots are gone)' : 'envgit: vm was not running')
+      console.error((await vmDown(workdir)) ? 'envgit: vm stopped; its snapshots stay in .envgit/vm/snaps and `envgit vm up` resumes the session' : 'envgit: vm was not running')
       return 0
     case 'status': {
       const client = new VmClient(vmPaths(workdir).socket)
@@ -393,7 +463,7 @@ async function vmCmd(args: string[]): Promise<number> {
         return 1
       }
       const { msg } = await client.call({ op: 'status' })
-      console.log(`vm: running, base ${msg.base}, current ${msg.current}`)
+      console.log(msg.current ? `vm: running, base ${msg.base}, current ${msg.current}` : 'vm: running, no guest')
       return 0
     }
     case 'push': {
@@ -406,7 +476,7 @@ async function vmCmd(args: string[]): Promise<number> {
       try {
         const startedAt = new Date().toISOString()
         await vm.importTar(await tarFrom(workdir, paths))
-        const step = await recordStep(session, vmSnapshotting(policy, vm), {
+        const { step } = await recordVmStep(session, policy, vm, {
           startedAt,
           endedAt: new Date().toISOString(),
           action: { type: 'push', input: JSON.stringify(paths) },

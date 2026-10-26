@@ -8,6 +8,8 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -220,12 +222,23 @@ func lookPath(name string) string {
 
 // ---- workdir transfer as tar ----
 
-func exportTar() ([]byte, error) {
+// entry is one file or symlink under /work in an export listing. Key changes whenever the entry
+// might have: ctime cannot be set from userspace, so a rewrite that restores size and mtime still shows.
+type entry struct {
+	Path string `json:"p"`
+	Key  string `json:"k"`
+}
+
+// exportTar lists every file and symlink under /work and tars the ones whose key differs from
+// `known` (what the host already has). The reply body is a 4-byte length, the listing as JSON, then
+// the tar — so a step that changed one file sends one file.
+func exportTar(known map[string]string) ([]byte, error) {
+	var listing []entry
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	base := root + workdir
 	err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || path == base {
+		if err != nil || path == base || d.IsDir() {
 			return err
 		}
 		info, err := os.Lstat(path)
@@ -235,18 +248,22 @@ func exportTar() ([]byte, error) {
 		link := ""
 		if info.Mode()&fs.ModeSymlink != 0 {
 			link, _ = os.Readlink(path)
-		} else if !info.Mode().IsRegular() && !info.IsDir() {
+		} else if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, _ := filepath.Rel(base, path)
+		rel = filepath.ToSlash(rel)
+		st := info.Sys().(*syscall.Stat_t)
+		key := fmt.Sprintf("%d:%d:%d.%d:%o", st.Ino, info.Size(), st.Ctim.Sec, st.Ctim.Nsec, uint32(info.Mode()))
+		listing = append(listing, entry{Path: rel, Key: key})
+		if known[rel] == key {
 			return nil
 		}
 		hdr, err := tar.FileInfoHeader(info, link)
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(base, path)
-		hdr.Name = filepath.ToSlash(rel)
-		if info.IsDir() {
-			hdr.Name += "/"
-		}
+		hdr.Name = rel
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
@@ -267,7 +284,12 @@ func exportTar() ([]byte, error) {
 	if err := tw.Close(); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	idx, err := json.Marshal(listing)
+	if err != nil {
+		return nil, err
+	}
+	out := binary.BigEndian.AppendUint32(make([]byte, 0, 4+len(idx)+buf.Len()), uint32(len(idx)))
+	return append(append(out, idx...), buf.Bytes()...), nil
 }
 
 func importTar(r io.Reader) error {
@@ -328,7 +350,14 @@ func serve(c io.ReadWriteCloser) {
 	case "exec":
 		_ = proto.Write(c, execute(m))
 	case "export":
-		b, err := exportTar()
+		known := map[string]string{}
+		if m.Size > 0 {
+			if err := json.NewDecoder(io.LimitReader(c, m.Size)).Decode(&known); err != nil {
+				proto.Fail(c, err)
+				return
+			}
+		}
+		b, err := exportTar(known)
 		if err != nil {
 			proto.Fail(c, err)
 			return

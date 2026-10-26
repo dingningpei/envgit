@@ -70,7 +70,7 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect((await envgit('gc')).stdout).toMatch(/removed 0 snapshot\(s\), 0 blob\(s\), 0 leftover temp file\(s\)/)
   }, 30_000)
 
-  it('drops an interrupted vm rewind when the VM is down', async () => {
+  it('drops an interrupted vm rewind whose snapshot is not on disk', async () => {
     const vmSession = join(dir, '.envgit/sessions/vm-old')
     await mkdir(vmSession, { recursive: true })
     await writeFile(join(vmSession, 'session.json'), JSON.stringify({ id: 'vm-old', createdAt: '', backend: 'vm' }))
