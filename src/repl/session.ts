@@ -18,6 +18,12 @@ export interface ReplResult {
   step: number
 }
 
+/** What the MCP server drives: srt's ReplSession or the vm backend's VmReplSession. */
+export interface Repl {
+  execute(code: string): Promise<ReplResult>
+  close(): Promise<void>
+}
+
 // The macOS violation log arrives asynchronously (and lossily); give it a moment before closing a step.
 const SETTLE_MS = 250
 
@@ -28,7 +34,7 @@ interface Worker {
   exited: Promise<void>
 }
 
-export class ReplSession {
+export class ReplSession implements Repl {
   private worker?: Worker
   private nextId = 0
   private claimed = new WeakSet<SandboxViolationEvent>()

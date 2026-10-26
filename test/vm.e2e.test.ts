@@ -33,6 +33,11 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1')('vm backend (e2e, ENVGIT_VM_E
     if (dir) await envgit('vm', 'down')
   }, 60_000)
 
+  it('has git, node and python in the guest', async () => {
+    const r = await envgit('run', 'sh', '-c', 'git --version; node -v; npm -v; python3 --version')
+    expect(r.stdout).toMatch(/^git version 2\.\d+.*\nv24\.\d+\.\d+\n\d+\.\d+\.\d+\nPython 3\.\d+/s)
+  }, 120_000)
+
   it('runs commands in the guest on files imported from the host', async () => {
     const r = await envgit('run', 'sh', '-c', 'cat notes.txt; python3 src/app.py')
     expect(r.stdout).toBe('original\nhi from L2\n')
@@ -165,5 +170,17 @@ irreversible:
     expect((await envgit('log')).stdout).toMatch(/ckpt {2}exit 0 .*before restarting the VM/)
     expect((await envgit('run', 'cat', 'restart.txt')).stdout).toBe('before\n')
     expect((await envgit('vm', 'up')).stderr).toMatch(/already running/)
+  }, 120_000)
+
+  it('does not resume a session on L2 images it was not taken on', async () => {
+    const id = (await readFile(join(dir, '.envgit/current'), 'utf8')).trim()
+    const metaPath = join(dir, '.envgit/sessions', id, 'session.json')
+    const meta = JSON.parse(await readFile(metaPath, 'utf8'))
+    await writeFile(metaPath, JSON.stringify({ ...meta, vmImage: 'an-older-image' }))
+    expect((await envgit('rewind', 'base')).stderr).toMatch(/taken on other L2 images/)
+    await envgit('vm', 'down')
+    const up = await envgit('vm', 'up')
+    expect(up.stderr).toMatch(/taken on other L2 images .*starting a new session/s)
+    expect((await readFile(join(dir, '.envgit/current'), 'utf8')).trim()).not.toBe(id)
   }, 120_000)
 })

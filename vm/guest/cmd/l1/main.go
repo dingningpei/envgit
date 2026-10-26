@@ -251,7 +251,9 @@ func (s *supervisor) boot() error {
 	for _, c := range [][3]string{
 		{"PUT", "/machine-config", fmt.Sprintf(`{"vcpu_count":2,"mem_size_mib":%d,"track_dirty_pages":true}`, s.l2mem)},
 		{"PUT", "/boot-source", `{"kernel_image_path":"/fc/vmlinux","initrd_path":"/fc/l2-initrd.cpio","boot_args":"console=ttyS0 reboot=k panic=1 rdinit=/init"}`},
-		{"PUT", "/drives/rootfs", `{"drive_id":"rootfs","path_on_host":"/fc/rootfs.squashfs","is_root_device":false,"is_read_only":true}`},
+		// L1's own read-only disks (envgit-vm attaches them): L2 sees them as vda and vdb.
+		{"PUT", "/drives/rootfs", `{"drive_id":"rootfs","path_on_host":"/dev/vda","is_root_device":false,"is_read_only":true}`},
+		{"PUT", "/drives/layer", `{"drive_id":"layer","path_on_host":"/dev/vdb","is_root_device":false,"is_read_only":true}`},
 		{"PUT", "/vsock", `{"guest_cid":3,"uds_path":"` + vsockUDS + `"}`},
 		{"PUT", "/actions", `{"action_type":"InstanceStart"}`},
 	} {
@@ -625,7 +627,7 @@ func (s *supervisor) serve(c io.ReadWriteCloser) {
 			return
 		}
 		_ = proto.Write(c, proto.Msg{ID: base, Ms: ms(time.Since(t0))})
-	case "exec", "export", "import", "trust":
+	case "exec", "export", "import", "trust", "install", "repl", "repl_kill":
 		s.relay(c, m)
 	case "snapshot":
 		s.mu.Lock()

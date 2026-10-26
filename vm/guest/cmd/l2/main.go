@@ -1,17 +1,24 @@
 // L2 agent: PID 1 inside the Firecracker guest (docs/design.md §3.6).
 //
-// Mounts the read-only CI rootfs under a tmpfs overlay, so every write — including /work, the
+// Mounts the read-only Ubuntu rootfs (vda) and the Node layer (vdb) under a tmpfs overlay, so every write — including /work, the
 // workdir — lives in guest memory and is captured by Firecracker's memory snapshots. Serves exec,
 // export, import and trust on vsock port 1024, and reaps every orphan as PID 1.
 //
 // Egress: there is no network device, only loopback. An HTTP proxy listens on 127.0.0.1:3128 and
 // tunnels each connection over vsock to the host (via L1), where envgit runs srt's proxy and the
-// irreversible-action gate — but only while a step is running.
+// irreversible-action gate — but only while a step is running. The host proxy's credentials change
+// every step, so the agent adds them to each connection itself; processes in here see a plain
+// http://127.0.0.1:3128 that stays valid for as long as they live (e.g. the REPL worker).
+//
+// REPL: `install` puts envgit's worker under /opt/envgit, and `repl` hands it code. The worker is the
+// agent's child and lives in guest memory, so a snapshot restore brings its variables back too.
 package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -22,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -80,12 +88,17 @@ func setup() error {
 	if err := syscall.Mount("/dev/vda", "/ro", "squashfs", syscall.MS_RDONLY, ""); err != nil {
 		return fmt.Errorf("mount rootfs: %w", err)
 	}
+	// The layer is absent (a placeholder) only while scripts/vm/build.sh builds it in this very VM.
+	_ = os.MkdirAll("/layer", 0o755)
+	if err := syscall.Mount("/dev/vdb", "/layer", "squashfs", syscall.MS_RDONLY, ""); err != nil {
+		logf("no layer (%v); booting the bare rootfs", err)
+	}
 	if err := syscall.Mount("tmpfs", "/rw", "tmpfs", 0, "mode=0755"); err != nil {
 		return fmt.Errorf("mount tmpfs: %w", err)
 	}
 	_ = os.MkdirAll("/rw/upper", 0o755)
 	_ = os.MkdirAll("/rw/work", 0o755)
-	if err := syscall.Mount("overlay", root, "overlay", 0, "lowerdir=/ro,upperdir=/rw/upper,workdir=/rw/work"); err != nil {
+	if err := syscall.Mount("overlay", root, "overlay", 0, "lowerdir=/layer:/ro,upperdir=/rw/upper,workdir=/rw/work"); err != nil {
 		return fmt.Errorf("mount overlay: %w", err)
 	}
 	for _, m := range []struct{ src, dst, typ string }{{"proc", "/proc", "proc"}, {"sysfs", "/sys", "sysfs"}, {"devtmpfs", "/dev", "devtmpfs"}, {"tmpfs", "/tmp", "tmpfs"}} {
@@ -163,10 +176,8 @@ func (c *capped) String() string {
 	return c.Buffer.String()
 }
 
-func execute(m proto.Msg) proto.Msg {
-	if len(m.Argv) == 0 {
-		return proto.Msg{Error: "empty argv"}
-	}
+// stepContext applies what the host sends with every step: the wall clock and the proxy credentials.
+func stepContext(m proto.Msg) {
 	if m.NowNs > 0 {
 		// TLS certificate checks, make and anything else that reads the time need the real one.
 		tv := unix.NsecToTimeval(m.NowNs)
@@ -174,6 +185,18 @@ func execute(m proto.Msg) proto.Msg {
 			logf("settimeofday: %v", err)
 		}
 	}
+	if m.ProxyAuth != "" {
+		proxyAuth.Store(base64.StdEncoding.EncodeToString([]byte(m.ProxyAuth)))
+	}
+}
+
+var proxyAuth atomic.Value // base64 of "user:token"
+
+func execute(m proto.Msg) proto.Msg {
+	if len(m.Argv) == 0 {
+		return proto.Msg{Error: "empty argv"}
+	}
+	stepContext(m)
 	outR, outW, _ := os.Pipe()
 	errR, errW, _ := os.Pipe()
 	devnull, _ := os.Open("/dev/null")
@@ -332,8 +355,7 @@ func exportTar(known map[string]string) ([]byte, error) {
 	return append(append(out, idx...), buf.Bytes()...), nil
 }
 
-func importTar(r io.Reader) error {
-	base := root + workdir
+func importTar(r io.Reader, base string) error {
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
@@ -393,6 +415,116 @@ func writeTrust(extra io.Reader) error {
 	return os.WriteFile(root+caBundle, append(append(roots, '\n'), add...), 0o644)
 }
 
+// ---- REPL worker ----
+
+const installDir = "/opt/envgit"
+
+type worker struct {
+	pid   int
+	stdin *os.File
+	out   *bufio.Reader
+}
+
+var (
+	replMu    sync.Mutex
+	wk        *worker
+	workerPid atomic.Int64 // wk.pid, readable without replMu
+)
+
+// repl runs m.Code in the worker (starting it with m.Env if needed) and returns its reply line.
+func repl(m proto.Msg) proto.Msg {
+	replMu.Lock()
+	defer replMu.Unlock()
+	stepContext(m)
+	if wk == nil {
+		w, err := startWorker(m.Env)
+		if err != nil {
+			return proto.Msg{Error: err.Error()}
+		}
+		wk = w
+		workerPid.Store(int64(w.pid))
+	}
+	req, _ := json.Marshal(map[string]any{"id": 1, "code": m.Code})
+	if _, err := wk.stdin.Write(append(req, '\n')); err != nil {
+		stopWorkerLocked()
+		return proto.Msg{Error: "REPL worker exited; REPL state was reset"}
+	}
+	timeout := time.Duration(m.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	line, err := readLine(wk.out, timeout)
+	if err != nil {
+		stopWorkerLocked()
+		return proto.Msg{Error: fmt.Sprintf("%v; REPL state was reset", err)}
+	}
+	return proto.Msg{Stdout: line}
+}
+
+func startWorker(env []string) (*worker, error) {
+	inR, inW, _ := os.Pipe()
+	outR, outW, _ := os.Pipe()
+	devnull, _ := os.OpenFile("/dev/null", os.O_WRONLY, 0)
+	attr := &syscall.ProcAttr{
+		Dir:   workdir,
+		Env:   mergeEnv([]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LANG=C.UTF-8"}, env),
+		Files: []uintptr{inR.Fd(), outW.Fd(), devnull.Fd()},
+		Sys:   &syscall.SysProcAttr{Chroot: root, Setpgid: true},
+	}
+	pid, err := syscall.ForkExec("/usr/local/bin/node", []string{"node", installDir + "/worker.mjs"}, attr)
+	inR.Close()
+	outW.Close()
+	devnull.Close()
+	if err != nil {
+		inW.Close()
+		outR.Close()
+		return nil, fmt.Errorf("start REPL worker: %v (is envgit's worker installed?)", err)
+	}
+	w := &worker{pid: pid, stdin: inW, out: bufio.NewReaderSize(outR, 1<<20)}
+	if line, err := readLine(w.out, 30*time.Second); err != nil || !strings.Contains(line, `"ready"`) {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		inW.Close()
+		outR.Close()
+		return nil, fmt.Errorf("REPL worker did not start: %v %s", err, line)
+	}
+	return w, nil
+}
+
+// readLine reads one line, giving up after timeout (the pipe read is left to finish on its own).
+func readLine(r *bufio.Reader, timeout time.Duration) (string, error) {
+	type res struct {
+		s   string
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() { s, err := r.ReadString('\n'); ch <- res{s, err} }()
+	select {
+	case x := <-ch:
+		if x.err != nil {
+			return "", fmt.Errorf("REPL worker exited")
+		}
+		return strings.TrimRight(x.s, "\n"), nil
+	case <-time.After(timeout):
+		return "", fmt.Errorf("timed out after %s", timeout)
+	}
+}
+
+func stopWorker() {
+	replMu.Lock()
+	defer replMu.Unlock()
+	stopWorkerLocked()
+}
+
+func stopWorkerLocked() {
+	if wk == nil {
+		return
+	}
+	_ = syscall.Kill(-wk.pid, syscall.SIGKILL)
+	wk.stdin.Close()
+	wk = nil
+	workerPid.Store(0)
+}
+
 // ---- egress: loopback proxy port tunnelled to the host ----
 
 func proxy() {
@@ -411,16 +543,78 @@ func proxy() {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		go func() {
-			up, err := vsock.Dial(unix.VMADDR_CID_HOST, proxyPort)
-			if err != nil {
-				splice.Refuse(c)
-				return
-			}
-			splice.Join(c, up)
-		}()
+		go tunnel(c.(*net.TCPConn))
 	}
 }
+
+// tunnel forwards one client connection to the host proxy, with this step's credentials added to its
+// first request. A CONNECT carries one request per connection; for plain-HTTP proxying the agent asks
+// for `Connection: close`, so a kept-alive second request cannot go out without credentials.
+func tunnel(c *net.TCPConn) {
+	r := bufio.NewReaderSize(c, 64<<10)
+	_ = c.SetReadDeadline(time.Now().Add(30 * time.Second))
+	var head []string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			c.Close()
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		head = append(head, line)
+		if len(head) > 200 {
+			c.Close()
+			return
+		}
+	}
+	_ = c.SetReadDeadline(time.Time{})
+	if len(head) == 0 {
+		c.Close()
+		return
+	}
+	connect := strings.HasPrefix(strings.ToUpper(head[0]), "CONNECT ")
+	out := []string{head[0]}
+	for _, h := range head[1:] {
+		name, _, _ := strings.Cut(h, ":")
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "proxy-authorization":
+			continue
+		case "connection", "proxy-connection", "keep-alive":
+			if !connect {
+				continue
+			}
+		}
+		out = append(out, h)
+	}
+	if auth, _ := proxyAuth.Load().(string); auth != "" {
+		out = append(out, "Proxy-Authorization: Basic "+auth)
+	}
+	if !connect {
+		out = append(out, "Connection: close")
+	}
+	up, err := vsock.Dial(unix.VMADDR_CID_HOST, proxyPort)
+	if err != nil {
+		splice.Unavailable(c)
+		return
+	}
+	if _, err := up.Write([]byte(strings.Join(out, "\r\n") + "\r\n\r\n")); err != nil {
+		c.Close()
+		up.Close()
+		return
+	}
+	splice.Join(&bufferedConn{c, r}, up)
+}
+
+// bufferedConn reads through the reader that already holds the bytes after the request head.
+type bufferedConn struct {
+	*net.TCPConn
+	r *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
 
 func loopbackUp() error {
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
@@ -474,8 +668,29 @@ func serve(c io.ReadWriteCloser) {
 			return
 		}
 		_ = proto.Write(c, proto.Msg{Op: "trusted"})
+	case "install":
+		// envgit's REPL worker: replaced wholesale, and the next repl call starts it afresh.
+		stopWorker()
+		_ = os.RemoveAll(root + installDir)
+		if err := os.MkdirAll(root+installDir, 0o755); err != nil {
+			proto.Fail(c, err)
+			return
+		}
+		if err := importTar(io.LimitReader(c, m.Size), root+installDir); err != nil {
+			proto.Fail(c, err)
+			return
+		}
+		_ = proto.Write(c, proto.Msg{Op: "installed"})
+	case "repl":
+		_ = proto.Write(c, repl(m))
+	case "repl_kill":
+		// Without the lock a running repl holds: killing the worker makes that call return.
+		if pid := workerPid.Load(); pid > 0 {
+			_ = syscall.Kill(-int(pid), syscall.SIGKILL)
+		}
+		_ = proto.Write(c, proto.Msg{Op: "killed"})
 	case "import":
-		if err := importTar(io.LimitReader(c, m.Size)); err != nil {
+		if err := importTar(io.LimitReader(c, m.Size), root+workdir); err != nil {
 			proto.Fail(c, err)
 			return
 		}

@@ -8,7 +8,7 @@ import type { Policy } from './schema.js'
  * terminates TLS with a per-run CA (trusted in the sandbox through the usual *_CA_BUNDLE variables)
  * and hands every request to the gate. Without such rules HTTPS stays an opaque, host-allowlisted tunnel.
  */
-export function compileSrt(policy: Policy, gate?: Gate): SandboxRuntimeConfig {
+export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath: string; keyPath: string } } = {}): SandboxRuntimeConfig {
   const fs = policy.filesystem ?? {}
   const net = policy.network ?? {}
   return {
@@ -17,7 +17,11 @@ export function compileSrt(policy: Policy, gate?: Gate): SandboxRuntimeConfig {
       deniedDomains: net.deny ?? [],
       ...(gate &&
         needsInspection(policy) && {
-          tlsTerminate: { ...(net.noInspect?.length && { excludeDomains: net.noInspect }) },
+          tlsTerminate: {
+            ...(net.noInspect?.length && { excludeDomains: net.noInspect }),
+            // A fixed CA (vm backend) so long-lived processes keep trusting the proxy from step to step.
+            ...(opts.ca && { caCertPath: opts.ca.certPath, caKeyPath: opts.ca.keyPath }),
+          },
           filterRequest: gate.filterRequest,
           // `/a/../b` or `%2e` spellings could name another resource than the one a rule judged.
           ambiguousRequestTarget: 'refuse' as const,

@@ -1,8 +1,11 @@
 // envgit-vm: boots the L1 microVM (docs/design.md §3.6) and bridges a host unix socket to the
 // L1 supervisor on vsock port 1024 — one vsock connection per accepted socket connection.
 //
-//   envgit-vm --kernel Image --initrd l1-initrd.cpio --socket path --share dir --proxy-socket path
-//             [--cpus 4] [--mem 4096] [--l2mem 1024]
+//   envgit-vm --kernel Image --initrd l1-initrd.cpio --rootfs rootfs.squashfs --layer layer.squashfs
+//             --socket path --share dir --proxy-socket path [--cpus 4] [--mem 4096] [--l2mem 1024]
+//
+// The two images are attached read-only as L1's /dev/vda and /dev/vdb, which L1 passes to L2's
+// Firecracker as its drives: L2's root is the rootfs with the layer (Node) on top.
 //
 // `dir` (the workdir's .envgit/vm/snaps) is shared into L1 over virtiofs with tag "envgit"; L1 writes
 // every snapshot there. Guest connections to vsock port 3128 (L2's egress, via L1) are joined to the
@@ -22,8 +25,10 @@ let initrd = opts["--initrd"] ?? ""
 let socketPath = opts["--socket"] ?? ""
 let sharePath = opts["--share"] ?? ""
 let proxySocketPath = opts["--proxy-socket"] ?? ""
-if kernel.isEmpty || initrd.isEmpty || socketPath.isEmpty || sharePath.isEmpty || proxySocketPath.isEmpty {
-  log("usage: envgit-vm --kernel K --initrd I --socket S --share DIR --proxy-socket P [--cpus N] [--mem MiB] [--l2mem MiB]")
+let rootfsPath = opts["--rootfs"] ?? ""
+let layerPath = opts["--layer"] ?? ""
+if kernel.isEmpty || initrd.isEmpty || socketPath.isEmpty || sharePath.isEmpty || proxySocketPath.isEmpty || rootfsPath.isEmpty || layerPath.isEmpty {
+  log("usage: envgit-vm --kernel K --initrd I --rootfs R --layer L --socket S --share DIR --proxy-socket P [--cpus N] [--mem MiB] [--l2mem MiB]")
   exit(2)
 }
 
@@ -51,6 +56,11 @@ config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
 let share = VZVirtioFileSystemDeviceConfiguration(tag: "envgit")
 share.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: sharePath), readOnly: false))
 config.directorySharingDevices = [share]
+do {
+  config.storageDevices = try [rootfsPath, layerPath].map { path in
+    VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: path), readOnly: true))
+  }
+} catch { log("disk images: \(error)"); exit(1) }
 do { try config.validate() } catch { log("config: \(error)"); exit(1) }
 
 final class Delegate: NSObject, VZVirtualMachineDelegate {

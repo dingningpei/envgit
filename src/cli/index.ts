@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { access, copyFile, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
-import { startEgress, type Egress } from '../core/env/vm-egress.js'
-import { copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmSnapshotExists, vmStale, vmUp, type MirrorResult } from '../core/env/vm.js'
+import { L2_NET_ENV } from '../core/env/vm-egress.js'
+import { recordVmStep, reportMirror, withEgress } from '../core/env/vm-step.js'
+import { copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmImageStamp, vmSnapshotExists, vmStale, vmUp } from '../core/env/vm.js'
 import { Gate, irreversibleOf } from '../core/policy/gate.js'
 import { ttyApprover } from './approve.js'
 import { loadPolicy } from '../core/policy/load.js'
@@ -32,6 +33,7 @@ import {
 import type { Effect, SnapshotId } from '../core/env/backend.js'
 import { SnapshotStore } from '../core/snapshot/store.js'
 import { ReplSession } from '../repl/session.js'
+import { VmReplSession } from '../repl/vm-session.js'
 import { runWorker } from '../repl/worker.js'
 
 const [cmd = 'help', ...args] = process.argv.slice(2)
@@ -151,11 +153,23 @@ async function mcp(mode: 'repl' | 'tools'): Promise<number> {
   // stdout carries JSON-RPC; keep every diagnostic on stderr.
   console.log = console.error
   const policy = await requireInit()
+  // stdin is the MCP transport, so approval goes through the client (elicitation) once it connects.
+  const gate = new Gate(policy, undefined, 'no MCP client that can ask (elicitation)')
+  if (policy.backend === 'vm') {
+    const session = await vmSession(policy)
+    const vm = new VmBackend()
+    await vm.create({ workdir: process.cwd() })
+    const repl = new VmReplSession(vm, policy, session, snapshotting(policy), gate)
+    try {
+      await serveMcp(repl, policy, process.cwd(), mode, gate)
+    } finally {
+      await repl.close()
+    }
+    return 0
+  }
   const backend = new SrtBackend()
   const session = await openSession(ROOT, backend.name)
   const snap = snapshotting(policy)
-  // stdin is the MCP transport, so approval goes through the client (elicitation) once it connects.
-  const gate = new Gate(policy, undefined, 'no MCP client that can ask (elicitation)')
   const env = await backend.create({ workdir: process.cwd(), policy, snapshots: snap, gate })
   const repl = new ReplSession(backend, env, policy, session, snap)
   try {
@@ -271,6 +285,9 @@ async function rewind(args: string[]): Promise<number> {
     return 1
   }
   // Rewinding replaces the guest's state anyway; only make sure it lands in a VM on the current build.
+  if (session.meta.backend === 'vm' && session.meta.vmImage !== (await vmImageStamp())) {
+    throw new Error(`vm: session ${session.meta.id} was taken on other L2 images (rebuilt since); its snapshots cannot restore onto these`)
+  }
   if (session.meta.backend === 'vm' && (await vmStale(process.cwd()))) await vmDown(process.cwd())
   const head = await readHead(session.dir)
   const headId = await snapshotOf(session, head)
@@ -333,8 +350,11 @@ async function fork(args: string[]): Promise<number> {
 /** A vm fork gets the snapshot chain and a session at it, then boots once to fill its mirror. */
 async function forkVm(session: OpenSession, target: StepRef, id: SnapshotId, tmp: string, dir: string): Promise<number> {
   await copyVmSnapshots(process.cwd(), tmp, id)
+  // The forked guest's processes (the REPL worker) already trust this workdir's proxy CA.
+  await cp(join(vmPaths(process.cwd()).state, 'ca'), join(vmPaths(tmp).state, 'ca'), { recursive: true }).catch(() => {})
   const forked = await createSession(join(tmp, '.envgit'), 'vm')
   forked.meta.base = id
+  forked.meta.vmImage = session.meta.vmImage
   forked.meta.forkedFrom = { session: session.meta.id, step: target, snapshot: id }
   await writeMeta(forked)
   await rename(tmp, dir)
@@ -383,40 +403,13 @@ function vmSnapshotting(policy: Policy, vm: VmBackend): Snapshotting {
   return { ...snapshotting(policy), take: () => vm.snapshot() }
 }
 
-/** Per kind, so a step like `npm install` does not put tens of thousands of paths in the log. */
-const MAX_FS_EFFECTS = 1000
-
-/** What the step did to /work, as seen by comparing the guest with the previous sync. */
-function mirrorEffects(m: MirrorResult): Effect[] {
-  return [
-    ...m.changed.slice(0, MAX_FS_EFFECTS).map(path => ({ kind: 'fs', op: 'write', path }) as const),
-    ...m.deleted.slice(0, MAX_FS_EFFECTS).map(path => ({ kind: 'fs', op: 'delete', path }) as const),
-  ]
-}
-
-function reportMirror(m: MirrorResult): void {
-  if (m.refused) console.error(red(`envgit: mirror refused ${m.refused} path(s) that would resolve outside the workdir`))
-  if (m.conflicts.length) {
-    const shown = m.conflicts.slice(0, 5).join(', ') + (m.conflicts.length > 5 ? `, … (${m.conflicts.length})` : '')
-    console.error(red(`envgit: kept host edits not yet pushed to the VM: ${shown} — \`envgit vm push\` them, or delete them to take the VM's version`))
-  }
-}
-
-/** Snapshots the guest first, so the mirror and the step's effects describe the recorded state. */
-async function recordVmStep(session: OpenSession, policy: Policy, vm: VmBackend, partial: Parameters<typeof recordStep>[2]) {
-  const snapshot = await vm.snapshot()
-  const m = await vm.syncMirror()
-  reportMirror(m)
-  const step = await recordStep(session, { ...snapshotting(policy), take: async () => snapshot }, { ...partial, effects: [...partial.effects, ...mirrorEffects(m)] })
-  return { step, mirror: m }
-}
 
 /**
  * A VM booted from an older build (scripts/vm/build.sh ran since) lacks whatever changed in L1/L2.
  * Checkpoint its guest as a step — background processes may have moved on since the last one — stop
  * it, and boot the current build at that checkpoint. Snapshots are on the host, so nothing is lost.
  */
-async function restartIfStale(policy: Policy): Promise<boolean> {
+async function restartIfStale(policy: Policy, opts: { up?: boolean } = {}): Promise<boolean> {
   const workdir = process.cwd()
   if (!(await vmStale(workdir))) return false
   const busy = await busyHolder(ROOT)
@@ -425,12 +418,18 @@ async function restartIfStale(policy: Policy): Promise<boolean> {
   const session = await currentVmSession()
   const status = await new VmClient(vmPaths(workdir).socket).call({ op: 'status' }).catch(() => undefined)
   let at: SnapshotId | undefined
+  if (session && session.meta.vmImage !== (await vmImageStamp())) {
+    // The checkpoint could not restore onto the new disks; stop, and let `vm up` start a new session.
+    await vmDown(workdir)
+    if (opts.up) return false
+    throw new Error(`vm: the L2 images were rebuilt since session ${session.meta.id} began, so it cannot continue on them; run \`envgit vm up\` for a new session`)
+  }
   if (session && status?.msg.current) {
     const vm = new VmBackend()
     await vm.create({ workdir })
     await acquireBusy(ROOT)
     try {
-      const { step } = await recordVmStep(session, policy, vm, {
+      const { step } = await recordVmStep(session, snapshotting(policy), vm, {
         startedAt: new Date().toISOString(),
         endedAt: new Date().toISOString(),
         action: { type: 'checkpoint', input: 'before restarting the VM on a new build' },
@@ -484,20 +483,14 @@ async function runVm(argv: string[], policy: Policy, gate: Gate, shellIrreversib
   const vm = new VmBackend()
   const env = await vm.create({ workdir: process.cwd() })
   await acquireBusy(ROOT)
-  let egress: Egress | undefined
   try {
     const started = new Date()
-    if (policy.network?.allow?.length) {
-      egress = await startEgress(process.cwd(), policy, gate)
-      await vm.trust(egress.ca)
-    }
-    const result = await vm.exec(env, { argv, env: egress?.env })
-    const effects = [...result.effects, ...gate.drain(), ...(egress?.denials(started) ?? [])]
-    await egress?.stop()
-    egress = undefined
+    const net = policy.network?.allow?.length ? L2_NET_ENV : undefined
+    const { result, effects: netEffects } = await withEgress(process.cwd(), policy, gate, vm, () => vm.exec(env, { argv, env: net }))
+    const effects = [...result.effects, ...netEffects]
     reportEffects(effects)
     const irreversible = shellIrreversible ?? irreversibleOf(effects)
-    const { step, mirror: m } = await recordVmStep(session, policy, vm, {
+    const { step, mirror: m } = await recordVmStep(session, snapshotting(policy), vm, {
       startedAt: started.toISOString(),
       endedAt: new Date().toISOString(),
       action: { type: 'exec', input: JSON.stringify(argv) },
@@ -508,7 +501,6 @@ async function runVm(argv: string[], policy: Policy, gate: Gate, shellIrreversib
     console.error(`envgit: step ${step.index} recorded in vm session ${session.meta.id}${m.written || m.removed ? ` (mirror: ${m.written} written, ${m.removed} removed)` : ''}`)
     return result.exitCode
   } finally {
-    await egress?.stop()
     await releaseBusy(ROOT)
   }
 }
@@ -519,7 +511,7 @@ async function vmCmd(args: string[]): Promise<number> {
   switch (args[0]) {
     case 'up': {
       const t0 = Date.now()
-      if (!args.includes('--new') && (await restartIfStale(policy)) && (await vmClientAlive(workdir))) return 0
+      if (!args.includes('--new') && (await restartIfStale(policy, { up: true })) && (await vmClientAlive(workdir))) return 0
       const current = args.includes('--new') ? undefined : await currentVmSession()
       const resumeAt = current && (await snapshotOf(current, await readHead(current.dir)))
       if (args.includes('--new') && (await vmStale(workdir))) await vmDown(workdir)
@@ -529,17 +521,21 @@ async function vmCmd(args: string[]): Promise<number> {
       }
       const vm = new VmBackend()
       await vm.create({ workdir })
-      if (current && resumeAt && (await vmSnapshotExists(workdir, resumeAt))) {
+      const sameImage = current?.meta.vmImage === (await vmImageStamp())
+      if (current && resumeAt && sameImage && (await vmSnapshotExists(workdir, resumeAt))) {
         const head = await readHead(current.dir)
         await vm.restore(resumeAt)
         reportMirror(await vm.syncMirror())
         console.error(`envgit: vm up in ${((Date.now() - t0) / 1000).toFixed(1)}s, resumed session ${current.meta.id} at ${head === 'base' ? 'base' : `step ${head}`}`)
         return 0
       }
-      if (current) console.error(`envgit: session ${current.meta.id} has no snapshot on disk to resume (it predates host-side snapshots); starting a new one`)
+      if (current && !sameImage) console.error(`envgit: session ${current.meta.id} was taken on other L2 images (rebuilt since); its snapshots cannot restore onto these, so starting a new session — it stays in the log`)
+      else if (current) console.error(`envgit: session ${current.meta.id} has no snapshot on disk to resume (it predates host-side snapshots); starting a new one`)
       await vm.boot()
       await vm.importTar(await tarFrom(workdir, ['.'], policy.snapshot?.exclude ?? []))
       const session = await createSession(ROOT, 'vm')
+      session.meta.vmImage = await vmImageStamp()
+      await writeMeta(session)
       await ensureBase(session, vmSnapshotting(policy, vm))
       // A manifest from an earlier session would make the first sync delete what this import left out.
       await rm(join(ROOT, 'vm', 'mirror.json'), { force: true })
@@ -570,7 +566,7 @@ async function vmCmd(args: string[]): Promise<number> {
       try {
         const startedAt = new Date().toISOString()
         await vm.importTar(await tarFrom(workdir, paths))
-        const { step } = await recordVmStep(session, policy, vm, {
+        const { step } = await recordVmStep(session, snapshotting(policy), vm, {
           startedAt,
           endedAt: new Date().toISOString(),
           action: { type: 'push', input: JSON.stringify(paths) },

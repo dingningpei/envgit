@@ -3,14 +3,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { buildCapabilities } from '../../repl/capabilities.js'
-import type { ReplSession } from '../../repl/session.js'
+import type { Repl } from '../../repl/session.js'
 import type { Effect } from '../../core/env/backend.js'
 import type { Policy } from '../../core/policy/schema.js'
 import type { Approver, Gate } from '../../core/policy/gate.js'
 
 export type McpMode = 'repl' | 'tools'
 
-export async function serveMcp(repl: ReplSession, policy: Policy, workdir: string, mode: McpMode = 'repl', gate?: Gate): Promise<void> {
+export async function serveMcp(repl: Repl, policy: Policy, workdir: string, mode: McpMode = 'repl', gate?: Gate): Promise<void> {
   const { declarations, globals } = buildCapabilities(policy.capabilities ?? {}, workdir)
   const server = new McpServer(
     { name: 'envgit', version: '0.0.1' },
@@ -23,13 +23,18 @@ export async function serveMcp(repl: ReplSession, policy: Policy, workdir: strin
   )
   if (mode === 'tools') registerDirectTools(server, repl, globals)
   else registerExecute(server, repl, declarations)
-  const closed = new Promise<void>(resolve => (server.server.onclose = resolve))
+  const closed = new Promise<void>(resolve => {
+    server.server.onclose = resolve
+    // The client going away closes stdin; with no worker process of ours keeping the loop alive (vm
+    // backend), that is the only signal we get.
+    process.stdin.once('end', resolve).once('close', resolve)
+  })
   if (gate) askThroughClient(server, gate)
   await server.connect(new StdioServerTransport())
   await closed
 }
 
-function registerExecute(server: McpServer, repl: ReplSession, declarations: string) {
+function registerExecute(server: McpServer, repl: Repl, declarations: string) {
   server.registerTool(
     'execute',
     {
@@ -98,7 +103,7 @@ const DIRECT_TOOLS: Record<string, { fn: string; description: string; params: st
   getIssue: { fn: 'github.getIssue', description: 'Get one GitHub issue.', params: ['args'], schema: { owner: z.string(), repo: z.string(), number: z.number() } },
 }
 
-function registerDirectTools(server: McpServer, repl: ReplSession, globals: Record<string, unknown>) {
+function registerDirectTools(server: McpServer, repl: Repl, globals: Record<string, unknown>) {
   for (const [name, t] of Object.entries(DIRECT_TOOLS)) {
     const [ns, fn] = t.fn.split('.') as [string, string]
     if (typeof (globals[ns] as Record<string, unknown> | undefined)?.[fn] !== 'function') continue

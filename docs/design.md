@@ -79,7 +79,8 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 - `node:vm` context in a long-lived worker process that runs under the env backend (srt in M1); the backend is the security boundary, `node:vm` only provides persistence. Persistent across steps (variables survive). The engine sits behind an `Engine` interface so QuickJS / isolated-vm can slot in where an in-process boundary is wanted.
 - Tools (MCP, CLI, HTTP) injected as typed async functions per `capabilities`.
 - Only `print()` / return value goes back to the model; everything else stays in the sandbox.
-- Each `execute` is one Step → one snapshot.
+- Each `execute` is one Step → one snapshot. On the vm backend the worker runs inside the guest and
+  is part of that snapshot, so `rewind` restores REPL variables too (§3.6); on srt it resets them.
 - Effects for a REPL step are recorded by the injected capability wrappers (files read/written, hosts contacted, denials), since the macOS sandbox violation log drops events for long-lived processes; the backend's violation log is a best-effort supplement.
 - No shell-string API by default; typed command capabilities instead.
 
@@ -138,12 +139,20 @@ envgit (TS) ──unix socket── envgit-vm (Swift, Virtualization.framework) 
   the log: background processes may have moved on since the last step), stop the VM, boot the new
   build and restore that checkpoint (≈ 2 s); `rewind` just restarts, since it replaces the state anyway.
 - **L1** is the Ubuntu arm64 generic kernel with an initramfs holding our Go supervisor, Firecracker,
-  `rebase-snap`, the L2 kernel/rootfs, and the vsock + virtiofs modules taken from the matching
-  `linux-modules` package (the same approach Claude's desktop VM takes). No disk, no network; one
-  virtiofs share, the workdir's `.envgit/vm/snaps`, where every snapshot goes.
-- **L2** boots the Firecracker CI kernel with our Go agent as its initrd. The agent mounts the
-  read-only CI rootfs, a tmpfs at `/work`, and runs commands via `chroot` with `/work` as cwd. Child
-  processes outlive the command that started them; the agent reaps them as PID 1.
+  `rebase-snap`, the L2 kernel and initrd, and the vsock + virtiofs modules taken from the matching
+  `linux-modules` package (the same approach Claude's desktop VM takes). Two read-only disks (L2's
+  images, passed through to Firecracker as L2's drives, so they are read on demand rather than held
+  in RAM), no network; one virtiofs share, the workdir's `.envgit/vm/snaps`, where every snapshot goes.
+- **L2** boots the Firecracker CI kernel with our Go agent as its initrd. The agent overlays a tmpfs
+  on two read-only squashfs layers — Node 24 (`/usr/local`) over the Ubuntu 24.04 server cloud image
+  (git, python3, curl, build tools from apt are a `run` away now that there is egress) — and runs
+  commands via `chroot` with `/work` as cwd. Child processes outlive the command that started them;
+  the agent reaps them as PID 1. Both images are pinned (the cloud image by dated release and the
+  checksum Ubuntu publishes, Node by `SHASUMS256.txt`). macOS has no `mksquashfs`, but the cloud image
+  does: `build.sh` boots the VM once on the bare image and lets L2 pack the Node layer (cached; ≈ 2.5
+  min the first time). A memory snapshot holds the page cache of these disks, so it only restores onto
+  the images it was taken on: a session records `vmImage` and is not resumed or rewound on others.
+  The agent itself lives in guest memory too, so new agent features need a new session (`vm up --new`).
 - **Workdir ownership:** while a VM session runs, files live in L2's `/work` (tmpfs, so the memory
   snapshot contains them — memory, processes and files are one consistent unit). The host workdir is
   a read-only mirror, synced from L2 after every step and after a rewind. Host edits go in through
@@ -175,12 +184,16 @@ sparse version, rebuilt from the packed copy);
   `127.0.0.1:3128` that tunnels each connection over vsock — L2 → Firecracker's UDS on L1 → L1 → VZ
   vsock 3128 → envgit-vm → a unix socket envgit serves. During `envgit run` envgit starts srt's proxy
   there with the policy's allowlist and the same gate as on srt (§4), so `network.l7`, irreversible
-  rules, prompts and the step's `net` effects all behave identically; commands in L2 get
-  `HTTP(S)_PROXY` with that run's token and a CA bundle (`/etc/envgit/ca.pem`: the rootfs roots plus
-  the per-run CA when TLS is terminated). Between steps nothing listens: a background process that
-  tries to reach out gets an HTTP 503 whose body starts with `envgit:` (plain HTTP; for `https://` the
-  client only reports a 503 to its CONNECT), and its token is dead by the next step. Starting and
-  stopping the proxy adds ≈ 0.15 s to a step when the policy allows any host. Only proxy-aware clients get out — raw sockets and DNS have no route — which is the
+  rules, prompts and the step's `net` effects all behave identically. Commands in L2 get a
+  credential-free `HTTP(S)_PROXY=http://127.0.0.1:3128` and a CA bundle (`/etc/envgit/ca.pem`: the
+  rootfs roots plus the workdir's proxy CA when TLS is terminated — one CA per workdir, generated once,
+  key kept on the host). The proxy's token changes every step; the agent adds the current one to each
+  connection's first request (and asks plain-HTTP requests for `Connection: close`), so long-lived
+  processes such as the REPL worker keep working from step to step. Between steps nothing listens: a
+  background process that tries to reach out gets an HTTP 503 whose body starts with `envgit:` (plain
+  HTTP; for `https://` the client only reports a 503 to its CONNECT). A background process started in
+  one step that reaches out during a later step gets through, and its requests are recorded on that
+  later step. Starting and stopping the proxy adds ≈ 0.15 s to a step when the policy allows any host. Only proxy-aware clients get out — raw sockets and DNS have no route — which is the
   egress property, not a gap. Every exec also carries the host's wall clock, because a restored
   guest's clock is wherever its snapshot left it (TLS checks fail otherwise).
 - **Protocol:** one framed protocol on both hops — a 4-byte length + JSON header, optionally followed
@@ -198,9 +211,16 @@ sparse version, rebuilt from the packed copy);
   3.5× native after a snapshot and 1.6× warm. Writing files in `/work` runs at ≈ 40–80 MB/s. So
   steps that touch a lot of memory pay for it; options are fewer snapshots for such steps, or
   Firecracker's mincore-based diffs without dirty tracking (bigger diffs, no write traps).
-- **Not yet:** a full rootfs with git/node (Claude's read-only root + overlay is the template) and with it `envgit mcp`
-  on this backend (the REPL worker needs node in L2), net effects in the step log, and a cap on the
-  disk the snapshots take besides `envgit gc`.
+- **REPL in L2:** `envgit mcp` on this backend installs envgit's worker (three compiled modules
+  and acorn, versioned) under `/opt/envgit` and runs it as the agent's child; each `execute` is a step
+  as on srt. The worker lives in guest memory, so a rewind brings its variables back to that step
+  (the srt REPL can only reset). Its timeout is kept on the host and pauses while a person is asked
+  to approve a request. `envgit mcp` keeps srt's proxy up between steps and opens only the tunnel.
+- **Costs of nesting, measured:** the first node start in a session ≈ 9 s (≈ 0.4 s after; reading
+  its 122 MB from squashfs is dominated by first-touch faults on L2 memory, not the disk — 48 MB of
+  raw block reads take 0.6 s), so the first `execute` ≈ 16 s; a `fetch` in the REPL 1–4 s.
+- **Not yet:** a cap on the disk the snapshots take besides `envgit gc`, and cheaper memory faults
+  (mincore diffs, above).
 
 ## 4. Irreversibility
 

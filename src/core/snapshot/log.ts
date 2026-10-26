@@ -31,6 +31,8 @@ export interface SessionMeta {
   /** Workdir state before the first step. */
   base?: SnapshotId
   forkedFrom?: { session: string; step: number | 'base'; snapshot: SnapshotId }
+  /** vm backend: the L2 images (scripts/vm/build.sh's image-stamp) its snapshots were taken on. */
+  vmImage?: string
 }
 
 export async function openSession(root: string, backend: string): Promise<OpenSession> {

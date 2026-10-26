@@ -40,9 +40,15 @@ func closeWrite(c io.Writer) {
 // Refuse answers a proxy client that has no host proxy behind it (no step is running) with an HTTP
 // error whose body starts with "envgit: ", so an agent can tell policy from a broken network.
 func Refuse(c net.Conn) {
-	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
 	_, _ = bufio.NewReader(c).ReadString('\n') // the request line; the rest does not matter
+	Unavailable(c)
+}
+
+// Unavailable is Refuse for a client whose request head was already read.
+func Unavailable(c net.Conn) {
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
 	body := "envgit: the sandbox has network access only while a step runs (envgit run)\n"
 	_, _ = fmt.Fprintf(c, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 }

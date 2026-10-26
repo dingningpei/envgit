@@ -19,6 +19,8 @@ type Msg struct {
 	Argv      []string `json:"argv,omitempty"`
 	Env       []string `json:"env,omitempty"` // KEY=VALUE, over the agent's defaults
 	NowNs     int64    `json:"now_ns,omitempty"` // host wall clock; a restored guest's clock is wherever the snapshot left it
+	ProxyAuth string   `json:"proxy_auth,omitempty"` // this step's host-proxy credentials ("user:token"), injected by the agent
+	Code      string   `json:"code,omitempty"`       // repl: JavaScript for the worker
 	TimeoutMs int      `json:"timeout_ms,omitempty"`
 	Exit      int      `json:"exit"`
 	Stdout    string   `json:"stdout,omitempty"`

@@ -16,6 +16,8 @@ export interface VmMsg {
   argv?: string[]
   env?: string[]
   now_ns?: number
+  proxy_auth?: string
+  code?: string
   timeout_ms?: number
   exit?: number
   stdout?: string
@@ -106,7 +108,7 @@ export async function vmUp(workdir: string, opts: { cpus?: number; mem?: number;
   const p = vmPaths(workdir)
   const client = new VmClient(p.socket)
   if (await client.alive()) return false
-  for (const f of ['envgit-vm', 'Image', 'l1-initrd.cpio']) {
+  for (const f of ['envgit-vm', 'Image', 'l1-initrd.cpio', 'rootfs.squashfs', 'layer.squashfs']) {
     await stat(join(p.build, f)).catch(() => {
       throw new Error(`vm: ${join(p.build, f)} is missing — run scripts/vm/build.sh`)
     })
@@ -116,7 +118,8 @@ export async function vmUp(workdir: string, opts: { cpus?: number; mem?: number;
   const log = await open(join(p.state, 'console.log'), 'w')
   const child = spawn(
     join(p.build, 'envgit-vm'),
-    ['--kernel', join(p.build, 'Image'), '--initrd', join(p.build, 'l1-initrd.cpio'), '--socket', p.socket, '--share', p.snaps, '--proxy-socket', p.proxy,
+    ['--kernel', join(p.build, 'Image'), '--initrd', join(p.build, 'l1-initrd.cpio'),
+     '--rootfs', join(p.build, 'rootfs.squashfs'), '--layer', join(p.build, 'layer.squashfs'), '--socket', p.socket, '--share', p.snaps, '--proxy-socket', p.proxy,
      '--cpus', String(opts.cpus ?? 4), '--mem', String(opts.mem ?? 4096), '--l2mem', String(opts.l2mem ?? 1024)],
     { detached: true, stdio: ['ignore', log.fd, log.fd] },
   )
@@ -136,6 +139,11 @@ export async function vmUp(workdir: string, opts: { cpus?: number; mem?: number;
 /** Identifies the build in `scripts/vm/build.sh`'s output; empty for a build from before stamps. */
 export async function vmBuildStamp(): Promise<string> {
   return (await readFile(join(vmDir(), 'build', 'stamp'), 'utf8').catch(() => '')).trim()
+}
+
+/** Identifies the L2 images. A memory snapshot only restores onto the disks it was taken with. */
+export async function vmImageStamp(): Promise<string> {
+  return (await readFile(join(vmDir(), 'build', 'image-stamp'), 'utf8').catch(() => '')).trim()
 }
 
 /** Whether a VM is running here that was booted from a different build than the current one. */
@@ -407,6 +415,8 @@ export class VmBackend implements EnvBackend {
   readonly name = 'vm'
   private client: VmClient
   private workdir = ''
+  /** This step's host-proxy credentials, sent along with each exec/repl for the L2 agent to apply. */
+  proxyAuth?: string
 
   constructor(socket?: string) {
     this.client = new VmClient(socket ?? '')
@@ -419,13 +429,41 @@ export class VmBackend implements EnvBackend {
     return { id: randomUUID(), backend: this.name }
   }
 
-  async exec(_env: Env, cmd: Command): Promise<ExecResult> {
+  /** `quiet`: don't echo the command's output (e.g. where stdout is the MCP transport). */
+  async exec(_env: Env, cmd: Command, _signal?: AbortSignal, opts: { quiet?: boolean } = {}): Promise<ExecResult> {
     const env = cmd.env && Object.entries(cmd.env).map(([k, v]) => `${k}=${v}`)
-    const { msg } = await this.client.call({ op: 'exec', argv: cmd.argv, now_ns: Date.now() * 1e6, ...(env && { env }) })
-    if (msg.stdout) process.stdout.write(msg.stdout)
-    if (msg.stderr) process.stderr.write(msg.stderr)
+    const { msg } = await this.client.call({ op: 'exec', argv: cmd.argv, ...this.stepFields(), ...(env && { env }) })
+    if (!opts.quiet && msg.stdout) process.stdout.write(msg.stdout)
+    if (!opts.quiet && msg.stderr) process.stderr.write(msg.stderr)
     // Writes stay inside the snapshot boundary; network effects come from the host-side gate (vm-egress.ts).
     return { exitCode: msg.exit ?? 1, stdout: msg.stdout ?? '', stderr: msg.stderr ?? '', effects: [] }
+  }
+
+  private stepFields(): VmMsg {
+    return { now_ns: Date.now() * 1e6, ...(this.proxyAuth && { proxy_auth: this.proxyAuth }) }
+  }
+
+  /** Replaces envgit's REPL worker files in L2 (/opt/envgit); the worker restarts on the next repl. */
+  async install(tar: Buffer): Promise<void> {
+    await this.client.call({ op: 'install' }, tar)
+  }
+
+  /**
+   * Runs `code` in L2's persistent REPL worker (started with `env` when there is none) and returns its
+   * reply line. The worker lives in guest memory, so it is snapshotted and restored with everything else.
+   */
+  async repl(code: string, env: Record<string, string>, timeoutMs: number): Promise<string> {
+    const { msg } = await this.client.call(
+      { op: 'repl', code, env: Object.entries(env).map(([k, v]) => `${k}=${v}`), timeout_ms: timeoutMs, ...this.stepFields() },
+      undefined,
+      timeoutMs + 60_000,
+    )
+    return msg.stdout ?? ''
+  }
+
+  /** Kills the REPL worker (a timed-out call then returns); its state is gone. */
+  async replKill(): Promise<void> {
+    await this.client.call({ op: 'repl_kill' }).catch(() => {})
   }
 
   /** Sets L2's CA bundle: its own roots plus `extraPem` (the host proxy's per-run CA, if any). */
