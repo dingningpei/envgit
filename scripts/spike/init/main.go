@@ -3,6 +3,7 @@
 //	probe  report whether /dev/kvm works (nested virtualization)
 //	tick   print a counter every second (to see VZ save/restore keep process state)
 //	dirty  like tick, after filling 256 MiB of memory
+//	preflight  vsock in L1 and L2, tools in the L2 rootfs
 //	fc     boot Firecracker inside, measure full/diff snapshots, restore and rebase
 //
 // Every measurement is printed as a "RESULT key=value" line on the console.
@@ -65,6 +66,10 @@ func main() {
 	case "fc":
 		if probe() {
 			firecracker()
+		}
+	case "preflight":
+		if probe() {
+			preflight()
 		}
 	default:
 		probe()
@@ -374,3 +379,46 @@ func charsToString(ca []int8) string {
 	}
 	return string(b)
 }
+
+func preflight() {
+	_, err := os.Stat("/dev/vsock")
+	result("l1_dev_vsock", err == nil)
+	drivers, _ := os.ReadDir("/sys/bus/virtio/drivers")
+	var names []string
+	for _, d := range drivers {
+		names = append(names, d.Name())
+	}
+	result("l1_virtio_drivers", strings.Join(names, ","))
+	if fam, err := syscall.Socket(40 /* AF_VSOCK */, syscall.SOCK_STREAM, 0); err == nil {
+		result("l1_af_vsock_socket", "ok")
+		syscall.Close(fam)
+	} else {
+		result("l1_af_vsock_socket", err.Error())
+	}
+
+	f, err := startFC("/tmp/pf.sock")
+	if err != nil {
+		result("error", err.Error())
+		return
+	}
+	defer f.kill()
+	f.must("PUT", "/machine-config", `{"vcpu_count":2,"mem_size_mib":512}`)
+	f.must("PUT", "/boot-source", `{"kernel_image_path":"/fc/vmlinux","boot_args":"console=ttyS0 reboot=k panic=1 ro init=/bin/sh"}`)
+	f.must("PUT", "/drives/rootfs", `{"drive_id":"rootfs","path_on_host":"/fc/rootfs.squashfs","is_root_device":true,"is_read_only":true}`)
+	f.must("PUT", "/vsock", `{"guest_cid":3,"uds_path":"/tmp/v.sock"}`)
+	f.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	for i := 0; i < 60; i++ {
+		f.send("echo shell-up")
+		if f.waitFor(`^(# )?shell-up$`, time.Second) != "" {
+			break
+		}
+	}
+	f.send(`mount -t proc proc /proc 2>/dev/null; mount -t sysfs sys /sys 2>/dev/null; echo "PF vsock_dev=$(test -e /dev/vsock && echo yes || echo no) drivers=$(ls /sys/bus/virtio/drivers | tr '\n' ',')"`)
+	result("l2_vsock", pfLine(f.waitFor(`^(# )?PF vsock_dev=`, 10*time.Second)))
+	f.send(`echo "PF tools=$(for t in sh bash tar gzip mkfs.ext4 mke2fs mount chroot git node python3 curl busybox apt-get; do command -v $t >/dev/null 2>&1 && printf '%s ' $t; done)"`)
+	result("l2_tools_present", pfLine(f.waitFor(`^(# )?PF tools=`, 10*time.Second)))
+	f.send(`. /etc/os-release; echo "PF os=$PRETTY_NAME rootfs=$(df -h / | tail -1 | tr -s ' ')"`)
+	result("l2_os", pfLine(f.waitFor(`^(# )?PF os=`, 10*time.Second)))
+}
+
+func pfLine(l string) string { return strings.TrimPrefix(strings.TrimPrefix(l, "# "), "PF ") }

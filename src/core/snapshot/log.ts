@@ -9,7 +9,7 @@ export interface Step {
   index: number
   startedAt: string
   endedAt: string
-  action: { type: 'exec' | 'repl'; input: string }
+  action: { type: 'exec' | 'repl' | 'push'; input: string }
   exitCode: number
   effects: Effect[]
   irreversible?: { reason: string }
@@ -125,12 +125,14 @@ export interface Snapshotting {
   store: SnapshotStore
   workdir: string
   exclude: string[]
+  /** Backends with native snapshots (vm) take them here instead of the fs-level store. */
+  take?: () => Promise<SnapshotId>
 }
 
 /** Takes the base snapshot if the session has none yet. Call before running the first step. */
 export async function ensureBase(session: OpenSession, snap: Snapshotting): Promise<void> {
   if (session.meta.base) return
-  session.meta.base = await snap.store.snapshot(snap.workdir, snap.exclude)
+  session.meta.base = snap.take ? await snap.take() : await snap.store.snapshot(snap.workdir, snap.exclude)
   await writeMeta(session)
 }
 
@@ -142,9 +144,14 @@ export async function recordStep(
 ): Promise<Step> {
   const steps = await readSteps(session.dir)
   const head = await readHead(session.dir)
-  const prevId = await snapshotOf(session, head)
-  const prev = prevId && (await snap.store.has(prevId)) ? await snap.store.read(prevId) : undefined
-  const snapshot = await snap.store.snapshot(snap.workdir, snap.exclude, prev)
+  let snapshot: SnapshotId
+  if (snap.take) {
+    snapshot = await snap.take()
+  } else {
+    const prevId = await snapshotOf(session, head)
+    const prev = prevId && (await snap.store.has(prevId)) ? await snap.store.read(prevId) : undefined
+    snapshot = await snap.store.snapshot(snap.workdir, snap.exclude, prev)
+  }
   const step: Step = { ...partial, index: steps.length, ...(head !== 'base' && { parent: head }), snapshot }
   await appendStep(session.dir, step)
   await writeHead(session.dir, step.index)

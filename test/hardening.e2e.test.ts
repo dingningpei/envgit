@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -68,5 +68,15 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect((await envgit('rewind', '0')).stderr).toMatch(/rewound to step 0/)
     expect(await readFile(join(dir, 'f'), 'utf8')).toBe('a\n')
     expect((await envgit('gc')).stdout).toMatch(/removed 0 snapshot\(s\), 0 blob\(s\), 0 leftover temp file\(s\)/)
+  }, 30_000)
+
+  it('drops an interrupted vm rewind when the VM is down', async () => {
+    const vmSession = join(dir, '.envgit/sessions/vm-old')
+    await mkdir(vmSession, { recursive: true })
+    await writeFile(join(vmSession, 'session.json'), JSON.stringify({ id: 'vm-old', createdAt: '', backend: 'vm' }))
+    await writeFile(join(dir, '.envgit/restoring'), JSON.stringify({ session: 'vm-old', target: 0, snapshot: 'abc' }))
+    const r = await envgit('log')
+    expect(r.stderr).toMatch(/dropped an interrupted vm rewind/)
+    await expect(readFile(join(dir, '.envgit/restoring'))).rejects.toThrow()
   }, 30_000)
 })

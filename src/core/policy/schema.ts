@@ -1,6 +1,8 @@
 /** Policy file shape. See docs/design.md §3.2 */
 
 export interface Policy {
+  /** Environment backend: `srt` (default, OS sandbox) or `vm` (nested Firecracker, docs/design.md §3.6). */
+  backend?: 'srt' | 'vm'
   filesystem?: {
     read?: { allow?: string[]; deny?: string[] }
     write?: { allow?: string[]; deny?: string[] }

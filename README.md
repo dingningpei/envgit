@@ -37,6 +37,8 @@ Early. See [`docs/design.md`](docs/design.md) for the plan.
 
 - **M2 (srt)** — every step snapshots the workdir (content-addressed, incremental). `envgit log` shows the chain, `envgit rewind <step|base>` restores it in place and keeps the abandoned steps in the log, `envgit fork <step> <dir>` materializes a step into a new directory, `envgit session new` starts a fresh session and `envgit gc` drops snapshots nothing refers to. A running `envgit mcp` notices a rewind and resets its REPL. Files only, not memory or processes.
 
+- **M2.5 (macOS, vm backend)** — `backend: vm` in the policy runs commands inside a Firecracker guest nested in a Virtualization-framework microVM, and every step is a Firecracker diff snapshot: `envgit rewind` brings back files **and running processes**. `envgit vm up` boots it (and imports the workdir), the host workdir becomes a read-only mirror synced after every step, and `envgit vm push <path>` sends host edits in as a step. Needs an M3+ Mac on macOS 15+ and `scripts/vm/build.sh` (downloads pinned kernels/Firecracker into `~/.cache/envgit/vm`). See [design §3.6](docs/design.md) and the [spike](docs/spike-nested-firecracker.md).
+
 ```bash
 npm install && npm run build
 cd your-project && node /path/to/envgit/dist/cli/index.js init

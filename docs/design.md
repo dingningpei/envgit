@@ -117,6 +117,47 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
   rewrite its own history. `snapshot.exclude` in the policy leaves more paths out.
 - Limits: files only, no memory or processes — that needs the VM tier.
 
+### 3.6 VM backend on macOS: nested Firecracker (`src/core/env/vm.ts`, `vm/`)
+
+Memory + process + file snapshots, from the spike in [`spike-nested-firecracker.md`](spike-nested-firecracker.md).
+
+```
+envgit (TS) ──unix socket── envgit-vm (Swift, Virtualization.framework) ──vsock── L1 supervisor (Go /init)
+                                                                                     │ Firecracker API + vsock
+                                                                                     └── L2 agent (Go /init) → chroot into the CI rootfs
+```
+
+- **Lifetime:** `envgit vm up` boots L1 and an L2 guest from a clean base and keeps both running;
+  `envgit vm down` stops them. `run` against a live VM costs one exec round trip plus one diff snapshot.
+- **L1** is the Ubuntu arm64 generic kernel with an initramfs holding our Go supervisor, Firecracker,
+  `rebase-snap`, the L2 kernel/rootfs, and the vsock modules taken from the matching
+  `linux-modules` package (the same approach Claude's desktop VM takes). No disk, no network.
+- **L2** boots the Firecracker CI kernel with our Go agent as its initrd. The agent mounts the
+  read-only CI rootfs, a tmpfs at `/work`, and runs commands via `chroot` with `/work` as cwd. Child
+  processes outlive the command that started them; the agent reaps them as PID 1.
+- **Workdir ownership:** while a VM session runs, files live in L2's `/work` (tmpfs, so the memory
+  snapshot contains them — memory, processes and files are one consistent unit). The host workdir is
+  a read-only mirror, synced from L2 after every step and after a rewind. Host edits go in through
+  `envgit vm push`, which is recorded as a step so it can be rewound. Later, `/work` moves to a
+  host-side disk image for capacity (APFS clone per snapshot, same ownership model).
+- **Snapshots:** a full snapshot of the base after boot, then one Firecracker diff per step; the diff
+  holds the pages dirtied since the previous snapshot or restore, so its size ≈ what the step wrote.
+  A step's memory = base + the diffs along its `parent` chain, merged with `rebase-snap` at restore.
+  vsock connections do not survive a snapshot load, so every request opens a new connection.
+- **Protocol:** one framed protocol on both hops — a 4-byte length + JSON header, optionally followed
+  by a byte stream (files, tar).
+- **Not portable:** Firecracker snapshots do not load on a different CPU model, so a snapshot taken on
+  a Mac will not restore on a Linux server even though the backend code is the same.
+- **Measured (M3 Pro):** `vm up` ≈ 6 s (L2 boot ≈ 3.7 s + base snapshot + import); a step's diff
+  snapshot 8–15 ms for a few MB; `rewind` ≈ 0.6 s, mostly copying the base memory file before
+  folding diffs in (keeping merged files per chain would cut that).
+- **Not yet:** L2 networking (M3, egress via a user-space stack like Claude's gVisor netstack), a full
+  rootfs with git/node (next milestone; Claude's read-only root + overlay is the template), L2 CPU
+  overhead measurement, streaming snapshots to the host so `rewind` works after `vm down` (today they
+  live in L1's RAM and vanish with it), `fork` and `envgit mcp` on this backend, fs/net effects in
+  the step log (L2 has no network, and its writes stay inside the snapshot), and the mirror is
+  read-only by convention only (files are not write-protected).
+
 ## 4. Irreversibility
 
 Effects are classified at policy-compile time and confirmed at runtime by the proxy:
