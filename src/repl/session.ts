@@ -5,7 +5,7 @@ import type { SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
 import type { Effect, Env } from '../core/env/backend.js'
 import { toEffect, type SrtBackend } from '../core/env/srt.js'
 import type { Policy } from '../core/policy/schema.js'
-import { appendStep, nextStepIndex, type Step } from '../core/snapshot/log.js'
+import { ensureBase, recordStep, type OpenSession, type Snapshotting } from '../core/snapshot/log.js'
 import { CAPABILITIES_ENV, type WorkerMessage, type WorkerRequest } from './worker.js'
 
 export interface ReplResult {
@@ -35,7 +35,8 @@ export class ReplSession {
     private readonly backend: SrtBackend,
     private readonly env: Env,
     private readonly policy: Policy,
-    private readonly sessionDir: string,
+    private readonly session: OpenSession,
+    private readonly snap: Snapshotting,
     private readonly timeoutMs = 30_000,
   ) {}
 
@@ -55,6 +56,7 @@ export class ReplSession {
   }
 
   private async run(code: string): Promise<ReplResult> {
+    await ensureBase(this.session, this.snap)
     const startedAt = new Date().toISOString()
     const worker = await this.ensureWorker()
     const id = this.nextId++
@@ -95,15 +97,13 @@ export class ReplSession {
         .filter(v => !this.claimed.has(v) && (this.claimed.add(v), true))
         .map(toEffect),
     ]
-    const step: Step = {
-      index: await nextStepIndex(this.sessionDir),
+    const step = await recordStep(this.session, this.snap, {
       startedAt,
       endedAt: new Date().toISOString(),
       action: { type: 'repl', input: code },
       exitCode: error ? 1 : 0,
       effects,
-    }
-    await appendStep(this.sessionDir, step)
+    })
     return { output, error, effects, step: step.index }
   }
 

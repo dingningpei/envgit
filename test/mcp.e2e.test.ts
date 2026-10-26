@@ -69,6 +69,7 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect(r.text).toContain(`[sandbox denied]\nfs read ${ssh}`)
     const log = await steps()
     expect(log.map(s => s.action.type)).toEqual(Array(log.length).fill('repl'))
+    expect(log.every(s => /^[0-9a-f]{64}$/.test(s.snapshot ?? ''))).toBe(true)
     const last = log.at(-1)!
     expect(last.exitCode).toBe(1)
     expect(last.effects).toContainEqual({ kind: 'fs', op: 'read', path: ssh, denied: true })

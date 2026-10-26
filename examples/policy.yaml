@@ -13,3 +13,7 @@ capabilities:
 irreversible:
   - net: { host: "github.com", method: POST, path: "/repos/*/git/*" }
   - shell: ["git push", "npm publish"]
+# Snapshots are fs-level on the srt backend. Uncomment to leave paths out of them
+# (an unchanged tree costs one stat per file, so large dirs are usually fine).
+# snapshot:
+#   exclude: ["node_modules"]

@@ -1,5 +1,6 @@
 /** Environment backend contract. See docs/design.md §3.1 */
 import type { Policy } from '../policy/schema.js'
+import type { SnapshotStore } from '../snapshot/store.js'
 
 export type SnapshotId = string & { readonly __brand: 'SnapshotId' }
 
@@ -7,6 +8,8 @@ export interface EnvSpec {
   workdir: string
   image?: string
   policy?: Policy
+  /** Where fs-level snapshots go, for backends without native ones. */
+  snapshots?: { store: SnapshotStore; exclude: string[] }
 }
 
 export interface Env {

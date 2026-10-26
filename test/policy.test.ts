@@ -13,7 +13,7 @@ describe('compileSrt', () => {
         denyRead: ['~/.ssh', '~/.aws', '**/.env'],
         allowRead: ['.'],
         allowWrite: ['.', '/tmp'],
-        denyWrite: ['.env'],
+        denyWrite: ['.env', '.envgit'],
       },
     })
   })
@@ -21,7 +21,7 @@ describe('compileSrt', () => {
   it('defaults to no network and no writes', () => {
     expect(compileSrt({})).toEqual({
       network: { allowedDomains: [], deniedDomains: [] },
-      filesystem: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: [] },
+      filesystem: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: ['.envgit'] },
     })
   })
 })

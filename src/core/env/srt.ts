@@ -14,7 +14,7 @@ export function shellQuote(argv: string[]): string {
 
 export class SrtBackend implements EnvBackend {
   readonly name = 'srt'
-  private env?: Env & { workdir: string }
+  private env?: Env & { workdir: string; snapshots?: EnvSpec['snapshots'] }
 
   async create(spec: EnvSpec): Promise<Env> {
     if (this.env) throw new Error('srt: only one env per process')
@@ -23,16 +23,26 @@ export class SrtBackend implements EnvBackend {
     }
     await SandboxManager.initialize(compileSrt(spec.policy ?? {}), undefined, true)
     if (!SandboxManager.isSandboxingEnabled()) throw new Error('srt: sandbox failed to initialize')
-    this.env = { id: randomUUID(), backend: this.name, workdir: spec.workdir }
+    this.env = { id: randomUUID(), backend: this.name, workdir: spec.workdir, snapshots: spec.snapshots }
     return this.env
   }
 
-  snapshot(): Promise<SnapshotId> {
-    return Promise.reject(new Error('srt: snapshots are not supported'))
+  /** fs-level only: the workdir, not memory or processes. */
+  async snapshot(env: Env): Promise<SnapshotId> {
+    const { workdir, snapshots } = this.current(env)
+    return snapshots.store.snapshot(workdir, snapshots.exclude)
   }
 
-  restore(): Promise<Env> {
-    return Promise.reject(new Error('srt: snapshots are not supported'))
+  async restore(id: SnapshotId): Promise<Env> {
+    const env = this.current(this.env)
+    await env.snapshots.store.restore(env.workdir, id, env.snapshots.exclude)
+    return env
+  }
+
+  private current(env: Env | undefined) {
+    if (!env || env !== this.env) throw new Error('srt: unknown env')
+    if (!this.env.snapshots) throw new Error('srt: env was created without a snapshot store')
+    return this.env as typeof this.env & { snapshots: NonNullable<EnvSpec['snapshots']> }
   }
 
   async spawn(env: Env, cmd: Command, stdio: StdioOptions, signal?: AbortSignal): Promise<{ child: ChildProcess; commandId: string }> {

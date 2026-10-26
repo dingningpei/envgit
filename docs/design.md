@@ -86,6 +86,22 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 - `claude-code`, `codex`, `copilot`: translate policy to native config; expose envgit as a remote/self-hosted environment where the vendor protocol allows (Codex `exec-server --remote` first).
 - `mcp`: expose the REPL as an MCP server so any client can use it without native support.
 
+### 3.5 fs-level snapshots on srt (`src/core/snapshot/store.ts`)
+
+- Content-addressed: blobs at `.envgit/objects/<sha256>` (APFS clones where available), one manifest per
+  snapshot at `.envgit/snapshots/<id>.json`. The id hashes paths, kinds, modes, file hashes and link
+  targets — not mtimes — so an unchanged tree always gets the same id.
+- Incremental: a file whose size, mtime and mode match the previous manifest is not re-read.
+- Each session has a **base** snapshot (before its first step) and a **head**. A step's `parent` is the
+  head when it ran; `rewind N` restores N's snapshot and moves head, leaving the abandoned steps in the
+  log. `fork N <dir>` restores into a new directory with its own `.envgit` and `forkedFrom`.
+- `rewind` refuses when the workdir differs from head's snapshot (edits made outside envgit) unless
+  `--force`, and prints every irreversible step it steps back over.
+- `.envgit` is always excluded from snapshots and always in srt's `denyWrite`, so the sandbox cannot
+  rewrite its own history. `snapshot.exclude` in the policy leaves more paths out.
+- Limits: files only, no memory or processes (a running `envgit mcp` keeps its REPL variables across a
+  rewind — restart it); restore is not atomic; no GC of unreferenced objects yet.
+
 ## 4. Irreversibility
 
 Effects are classified at policy-compile time and confirmed at runtime by the proxy:
@@ -99,7 +115,8 @@ The product promise is *audit + gate + in-sandbox rewind*, not a time machine.
 
 1. **M0** — `envgit init` / policy file / `envgit run <cmd>` on the srt backend with an action log.
 2. **M1** — REPL with persistent state and capability injection, exposed as an MCP server. Demo ([`demo-m1.md`](demo-m1.md)): 1.6× fewer context tokens on a 48 KB task, 9.4× (3.8× cost) on a 380 KB task where per-capability tools hit Claude Code's result-size limit and got the answer wrong.
-3. **M2** — Firecracker backend with per-step snapshots; `envgit log`, `envgit fork <step>`, `envgit rewind <step>`.
+3. **M2** — per-step snapshots; `envgit log`, `envgit fork <step>`, `envgit rewind <step>`. Done first on srt with fs-level snapshots (below), because Firecracker needs Linux + KVM; the Firecracker backend moves to M2.5.
+   - **M2.5** — Firecracker backend (Linux + KVM): full memory + disk snapshots behind the same `log` / `fork` / `rewind`.
 4. **M3** — Codex self-hosted environment adapter; irreversible-action gating through the egress proxy.
 5. **M4** — Apple Virtualization backend; web UI timeline.
 

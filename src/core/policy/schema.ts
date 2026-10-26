@@ -12,6 +12,8 @@ export interface Policy {
   }
   capabilities?: Record<string, boolean | string[]>
   irreversible?: IrreversibleRule[]
+  /** Workdir paths (prefixes) left out of snapshots. `.envgit` is always left out. */
+  snapshot?: { exclude?: string[] }
 }
 
 export type IrreversibleRule =

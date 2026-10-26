@@ -2,7 +2,7 @@
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import type { Policy } from './schema.js'
 
-// l7, capabilities and irreversible.net are not enforced on srt in M0.
+// l7, capabilities and irreversible.net are not enforced on srt.
 export function compileSrt(policy: Policy): SandboxRuntimeConfig {
   const fs = policy.filesystem ?? {}
   const net = policy.network ?? {}
@@ -15,7 +15,8 @@ export function compileSrt(policy: Policy): SandboxRuntimeConfig {
       denyRead: fs.read?.deny ?? [],
       allowRead: fs.read?.allow ?? [],
       allowWrite: fs.write?.allow ?? [],
-      denyWrite: fs.write?.deny ?? [],
+      // The sandbox must never rewrite its own history or snapshots.
+      denyWrite: [...(fs.write?.deny ?? []), '.envgit'],
     },
   }
 }
