@@ -165,7 +165,14 @@ envgit (TS) ──unix socket── envgit-vm (Swift, Virtualization.framework) 
   key differs. The paths a step wrote or deleted in `/work` are recorded as its `fs` effects (at most
 1000 of each per step). Later,
   `/work` moves to a host-side disk image for capacity (APFS clone per snapshot, same ownership model).
-- **Snapshots:** a full snapshot of the base after boot, then one Firecracker diff per step; the diff
+- **Prebuilt base:** a cold-booted L2 pays for every page it touches first (below), a restored one
+  far less, so `build.sh` boots one guest, runs node, npm, python and git in it once, and keeps its
+  full snapshot in `build/base/` (with the build stamp; ≈ 175 MB, ≈ 20 s to make). A new session
+  clones it into `.envgit/vm/snaps/` and restores it instead of booting — `vm up` ≈ 2 s instead of
+  6 s, the first node ≈ 1 s instead of 11 s — and falls back to a cold boot when the base belongs to
+  another build. Sessions restored from one snapshot do not share random numbers: Firecracker gives
+  each restored guest a new VMGenID and the L2 kernel reseeds its CRNG on it.
+- **Snapshots:** a full snapshot of the base (prebuilt, or taken after a cold boot), then one Firecracker diff per step; the diff
   holds the pages dirtied since the previous snapshot or restore, so its size ≈ what the step wrote.
   A step's memory = base + the diffs along its `parent` chain, merged with `rebase-snap` at restore.
   vsock connections do not survive a snapshot load, so every request opens a new connection.
@@ -200,27 +207,35 @@ sparse version, rebuilt from the packed copy);
   by a byte stream (files, tar).
 - **Not portable:** Firecracker snapshots do not load on a different CPU model, so a snapshot taken on
   a Mac will not restore on a Linux server even though the backend code is the same.
-- **Measured (M3 Pro):** fresh `vm up` ≈ 6 s (L2 boot ≈ 3.7 s + base snapshot + import); resuming
+- **Measured (M3 Pro):** new-session `vm up` ≈ 2 s from the prebuilt base (≈ 6 s with a cold boot: L2 boot ≈ 3.7 s + base snapshot + import); resuming
   after `vm down` ≈ 2 s; `envgit run true` ≈ 0.35 s end to end, its diff ≈ 2 MB; `rewind` on a live
   VM ≈ 0.75 s, on a stopped one ≈ 2 s (L1 boot included).
 - **L2 overhead** (`scripts/vm/bench`, same Go binary on the host and in L2): CPU (sha256) +7 %,
   syscalls ≈ native, but memory is the cost. A first write to a page after a snapshot traps for
   dirty-page tracking, and under nesting that exit is expensive: faulting in 256 MB takes 1.3 s in L2
   vs 12 ms on the host (≈ 20 µs a page); with pages already written since the last snapshot it is
-  83 ms; never-touched guest RAM is worse still (≈ 5 s, L1 and the host back it lazily). fork+exec is
+  83 ms. Never-touched guest RAM is worst: right after boot, faulting in 120 MB takes ≈ 7.8 s, almost
+  all system time (≈ 250 µs a page), and reading the 123 MB `node` binary the first time costs the
+  same (its page-cache pages are fresh RAM; the block device itself reads 40 MB in 36 ms, and
+  decompression is a small share). The expensive hop is L2→L1, the nested stage-2 fault: L1 touching
+  its own fresh memory costs ≈ 1.7 µs a page, so pre-touching L1 does not help. A guest restored from
+  a snapshot pays less for the same 120 MB (≈ 1.6–2.5 s; its memory is file-backed in L1) — hence the
+  prebuilt base; warming node during each session's own boot would only move the cost into `vm up`
+  (6 s → 12.5 s, first node 11 s → 3 s). fork+exec is
   3.5× native after a snapshot and 1.6× warm. Writing files in `/work` runs at ≈ 40–80 MB/s. So
-  steps that touch a lot of memory pay for it; options are fewer snapshots for such steps, or
-  Firecracker's mincore-based diffs without dirty tracking (bigger diffs, no write traps).
+  steps that touch a lot of memory pay for it. That trap is the price of diffs holding only what a
+  step wrote; Firecracker's mincore-based diffs avoid it but hold every resident page, so each step
+  would persist the whole working set — a known cost, not a planned change.
 - **REPL in L2:** `envgit mcp` on this backend installs envgit's worker (three compiled modules
   and acorn, versioned) under `/opt/envgit` and runs it as the agent's child; each `execute` is a step
   as on srt. The worker lives in guest memory, so a rewind brings its variables back to that step
   (the srt REPL can only reset). Its timeout is kept on the host and pauses while a person is asked
   to approve a request. `envgit mcp` keeps srt's proxy up between steps and opens only the tunnel.
-- **Costs of nesting, measured:** the first node start in a session ≈ 9 s (≈ 0.4 s after; reading
-  its 122 MB from squashfs is dominated by first-touch faults on L2 memory, not the disk — 48 MB of
-  raw block reads take 0.6 s), so the first `execute` ≈ 16 s; a `fetch` in the REPL 1–4 s.
-- **Not yet:** a cap on the disk the snapshots take besides `envgit gc`, and cheaper memory faults
-  (mincore diffs, above).
+- **Costs of nesting, measured:** from the prebuilt base, the first node in a session ≈ 1 s and the
+  first `execute` (worker install included) ≈ 3.5 s, against ≈ 11 s and ≈ 16 s after a cold boot;
+  a `fetch` in the REPL 1–4 s. Each step still pays the dirty-tracking trap for the pages it writes
+  again, so even a warm `envgit run node -e 1` takes ≈ 1–1.5 s end to end.
+- **Not yet:** a cap on the disk the snapshots take besides `envgit gc`.
 
 ## 4. Irreversibility
 

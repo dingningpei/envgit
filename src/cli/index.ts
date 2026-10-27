@@ -6,7 +6,7 @@ import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
 import { recordVmStep, reportMirror, withEgress } from '../core/env/vm-step.js'
-import { copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmImageStamp, vmSnapshotExists, vmStale, vmUp } from '../core/env/vm.js'
+import { buildPrebuiltBase, copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmImageStamp, vmSnapshotExists, vmStale, vmUp } from '../core/env/vm.js'
 import { Gate, irreversibleOf } from '../core/policy/gate.js'
 import { ttyApprover } from './approve.js'
 import { loadPolicy } from '../core/policy/load.js'
@@ -556,6 +556,11 @@ async function vmCmd(args: string[]): Promise<number> {
       console.log(msg.current ? `vm: running, base ${msg.base}, current ${msg.current}` : 'vm: running, no guest')
       return 0
     }
+    case 'prebuild':
+      // Used by scripts/vm/build.sh, in a throwaway workdir: the base snapshot new sessions restore.
+      if (!args[1]) throw new Error('usage: envgit vm prebuild <out-dir>')
+      await buildPrebuiltBase(workdir, resolve(args[1]))
+      return 0
     case 'push': {
       const paths = args.slice(1)
       if (!paths.length) throw new Error('usage: envgit vm push <path...>')

@@ -7,6 +7,7 @@
 #   build/layer.squashfs    Node, overlaid on the root under /usr/local
 #   build/image-stamp       hash of the two images; a session only resumes on the image it began on
 #   build/stamp             hash of everything above; a VM booted from another build is restarted
+#   build/base/             prebuilt full snapshot of a warmed-up guest; new sessions restore it
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -86,4 +87,19 @@ else
 fi
 (cd "$OUT" && cat rootfs.squashfs layer.squashfs | shasum -a 256 | cut -c1-16) > "$OUT/image-stamp"
 (cd "$OUT" && cat envgit-vm Image l1-initrd.cpio image-stamp | shasum -a 256 | cut -c1-16) > "$OUT/stamp"
-ls -la "$OUT"
+
+# A cold-booted L2 pays ≈ 250 µs for every page it touches first, a restored one far less: boot one
+# guest here, let it run node/python/git once, and keep its full snapshot for new sessions to restore.
+if [ "$(cat "$OUT/base/stamp" 2>/dev/null)" = "$(cat "$OUT/stamp")" ]; then
+  echo "ok       base snapshot"
+else
+  echo "building the prebuilt base snapshot"
+  rm -rf "$OUT/base"
+  BOOT="$WORK/base-build" && rm -rf "$BOOT" && mkdir -p "$BOOT"
+  (cd "$REPO" && npm run build >/dev/null)
+  (cd "$BOOT" && node "$REPO/dist/cli/index.js" init >/dev/null && echo 'backend: vm' > .envgit/policy.yaml \
+    && node "$REPO/dist/cli/index.js" vm prebuild "$OUT/base.part") || { echo "base snapshot failed" >&2; exit 1; }
+  mv "$OUT/base.part" "$OUT/base"
+  rm -rf "$BOOT"
+fi
+ls -la "$OUT" "$OUT/base"

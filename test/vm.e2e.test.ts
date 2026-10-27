@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -32,6 +32,13 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1')('vm backend (e2e, ENVGIT_VM_E
   afterAll(async () => {
     if (dir) await envgit('vm', 'down')
   }, 60_000)
+
+  it('starts new sessions from the prebuilt base snapshot', async () => {
+    const build = join(process.env.ENVGIT_VM_DIR ?? join(homedir(), '.cache/envgit/vm'), 'build')
+    const id = (await readFile(join(build, 'base/id'), 'utf8')).trim()
+    const meta = JSON.parse(await readFile(join(dir, '.envgit/vm/snaps', id, 'meta.json'), 'utf8')) as { kind: string }
+    expect(meta.kind).toBe('Full')
+  })
 
   it('has git, node and python in the guest', async () => {
     const r = await envgit('run', 'sh', '-c', 'git --version; node -v; npm -v; python3 --version')

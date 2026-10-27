@@ -230,6 +230,49 @@ export async function copyVmSnapshots(fromWorkdir: string, toWorkdir: string, id
   }
 }
 
+// ---- prebuilt base ----
+//
+// build/base/{id,stamp,meta.json,state,mem.idx,mem.dat}: a full snapshot of a guest that has run
+// node, python and git once, taken by build.sh with the build whose stamp it records. A cold-booted
+// guest pays for every page it touches first (≈ 250 µs each under nesting) and a restored one far
+// less, so new sessions restore this instead of booting. Sharing one snapshot does not mean sharing
+// random numbers: Firecracker gives every restored guest a new VMGenID and the kernel reseeds on it.
+
+/** What build.sh runs in the guest before taking the prebuilt base. */
+export const WARM_ARGV = ['sh', '-c', 'node -e 1 && npm -v && python3 -c 1 && git --version']
+
+/** Clones the prebuilt base into the workdir's snapshots if it belongs to this build; its id, or undefined. */
+async function usePrebuiltBase(workdir: string): Promise<SnapshotId | undefined> {
+  const dir = join(vmDir(), 'build', 'base')
+  const [id, stamp] = await Promise.all(['id', 'stamp'].map(f => readFile(join(dir, f), 'utf8').then(s => s.trim(), () => '')))
+  if (!id || !stamp || stamp !== (await vmBuildStamp())) return undefined
+  const to = join(vmPaths(workdir).snaps, id)
+  if (!(await vmSnapshotExists(workdir, id))) {
+    await rm(to, { recursive: true, force: true })
+    await mkdir(to, { recursive: true })
+    // meta.json last: vmSnapshotExists keys off it, so a half-copied base is copied again.
+    for (const f of ['state', 'mem.idx', 'mem.dat', 'meta.json']) await copyFile(join(dir, f), join(to, f), constants.COPYFILE_FICLONE)
+  }
+  return id as SnapshotId
+}
+
+/** Boots a warm guest in `workdir` (an empty envgit workdir) and writes its base snapshot to `out`. */
+export async function buildPrebuiltBase(workdir: string, out: string): Promise<void> {
+  await vmUp(workdir)
+  try {
+    const vm = new VmBackend()
+    await vm.create({ workdir })
+    const id = await vm.bootWarm(WARM_ARGV)
+    await rm(out, { recursive: true, force: true })
+    await mkdir(out, { recursive: true })
+    for (const f of ['meta.json', 'state', 'mem.idx', 'mem.dat']) await copyFile(join(vmPaths(workdir).snaps, id, f), join(out, f), constants.COPYFILE_FICLONE)
+    await writeFile(join(out, 'id'), `${id}\n`)
+    await writeFile(join(out, 'stamp'), `${await vmBuildStamp()}\n`)
+  } finally {
+    await vmDown(workdir)
+  }
+}
+
 // ---- workdir transfer ----
 
 /** Tars `paths` (relative to workdir; default everything) leaving `.envgit` and `exclude` out. */
@@ -471,9 +514,20 @@ export class VmBackend implements EnvBackend {
     await this.client.call({ op: 'trust' }, Buffer.from(extraPem))
   }
 
-  /** Starts a fresh L2 guest (empty /work) and returns its full base snapshot. */
+  /**
+   * Starts a fresh L2 guest (empty /work) and returns its full base snapshot: build.sh's prebuilt
+   * base, restored, when it matches this build — node, python and git already read in — else a cold boot.
+   */
   async boot(): Promise<SnapshotId> {
-    return (await this.client.call({ op: 'boot' })).msg.id as SnapshotId
+    const id = await usePrebuiltBase(this.workdir)
+    if (!id) return (await this.client.call({ op: 'boot' })).msg.id as SnapshotId
+    await this.restore(id)
+    return id
+  }
+
+  /** A cold boot that runs `warm` in the guest before the base snapshot (build.sh's prebuilt base). */
+  async bootWarm(warm: string[]): Promise<SnapshotId> {
+    return (await this.client.call({ op: 'boot', argv: warm })).msg.id as SnapshotId
   }
 
   async snapshot(): Promise<SnapshotId> {

@@ -1,7 +1,8 @@
 // L1 supervisor: PID 1 of the outer Virtualization-framework microVM (docs/design.md §3.6).
 //
 // Loads the vsock and virtiofs modules, mounts the host's snapshot directory, then serves envgit's
-// requests on vsock port 1024: boot starts a fresh L2 guest and takes a full base snapshot;
+// requests on vsock port 1024: boot starts a fresh L2 guest and takes a full base snapshot (envgit
+// normally restores build.sh's prebuilt one instead, which boot with a warm-up command made);
 // exec/export/import go to the L2 agent; snapshot takes a diff; restore merges base + diffs along the
 // parent chain and loads it in a fresh Firecracker process. Every snapshot is written to the host
 // share before it is acknowledged, so the host keeps them across L1 restarts; this VM's tmpfs holds
@@ -238,7 +239,9 @@ func waitAgent(timeout time.Duration) error {
 
 // ---- lifecycle ----
 
-func (s *supervisor) boot() error {
+// boot starts a fresh L2 guest and takes its full base snapshot. warm, if given, runs in the guest
+// first, so the base already holds what it read (build.sh's prebuilt base: node, python, git).
+func (s *supervisor) boot(warm []string) error {
 	t0 := time.Now()
 	if s.fc != nil {
 		s.fc.kill()
@@ -268,6 +271,12 @@ func (s *supervisor) boot() error {
 	}
 	s.fc = fc
 	logf("L2 up in %s", time.Since(t0).Round(time.Millisecond))
+	if len(warm) > 0 {
+		if err := s.warm(warm); err != nil {
+			return fmt.Errorf("warm-up: %v", err)
+		}
+		logf("warmed in %s", time.Since(t0).Round(time.Millisecond))
+	}
 	id, err := s.takeSnapshot("Full", "")
 	if err != nil {
 		return err
@@ -277,6 +286,25 @@ func (s *supervisor) boot() error {
 	}
 	s.base, s.current = id, id
 	return nil
+}
+
+func (s *supervisor) warm(argv []string) error {
+	a, err := dialAgent()
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+	if err := proto.Write(a, proto.Msg{Op: "exec", Argv: argv}); err != nil {
+		return err
+	}
+	r, err := proto.Read(a)
+	if err == nil && r.Error != "" {
+		err = fmt.Errorf("%s", r.Error)
+	}
+	if err == nil && r.Exit != 0 {
+		err = fmt.Errorf("exit %d: %s", r.Exit, r.Stderr)
+	}
+	return err
 }
 
 func (s *supervisor) takeSnapshot(kind, parent string) (string, error) {
@@ -619,7 +647,7 @@ func (s *supervisor) serve(c io.ReadWriteCloser) {
 	case "boot":
 		s.mu.Lock()
 		t0 := time.Now()
-		err := s.boot()
+		err := s.boot(m.Argv)
 		base := s.base
 		s.mu.Unlock()
 		if err != nil {
