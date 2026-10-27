@@ -93,9 +93,13 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1')('vm backend (e2e, ENVGIT_VM_E
     const head = Number(/head: (\d+)/.exec((await envgit('log')).stdout)![1])
     const before = Number((await envgit('run', 'cat', 'counter')).stdout)
     await envgit('run', 'sh', '-c', 'echo after > after.txt')
-    await envgit('vm', 'down')
+    // vm down checkpoints first, so what the counter did after the last step is kept too.
+    const down = await envgit('vm', 'down')
+    const ckpt = /at checkpoint step (\d+)/.exec(down.stderr)?.[1]
+    expect(ckpt).toBeDefined()
+    expect((await envgit('log')).stdout).toMatch(/ckpt {2}exit 0 .*before vm down/)
     const up = await envgit('vm', 'up')
-    expect(up.stderr).toMatch(/resumed session \S+ at step \d+/)
+    expect(up.stderr).toMatch(new RegExp(`resumed session \\S+ at step ${ckpt}`))
     // The background counter from an earlier step is still running after a cold resume.
     const resumed = Number((await envgit('run', 'cat', 'counter')).stdout)
     expect(resumed).toBeGreaterThan(before)

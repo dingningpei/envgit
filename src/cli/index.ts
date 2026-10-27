@@ -470,23 +470,7 @@ async function restartIfStale(policy: Policy, opts: { up?: boolean } = {}): Prom
     if (opts.up) return false
     throw new Error(`vm: the L2 images were rebuilt since session ${session.meta.id} began, so it cannot continue on them; run \`envgit vm up\` for a new session`)
   }
-  if (session && status?.msg.current) {
-    const vm = new VmBackend()
-    await vm.create({ workdir })
-    await acquireBusy(ROOT)
-    try {
-      const { step } = await recordVmStep(session, snapshotting(policy), vm, {
-        startedAt: new Date().toISOString(),
-        endedAt: new Date().toISOString(),
-        action: { type: 'checkpoint', input: 'before restarting the VM on a new build' },
-        exitCode: 0,
-        effects: [],
-      })
-      at = step.snapshot
-    } finally {
-      await releaseBusy(ROOT)
-    }
-  }
+  if (session && status?.msg.current) at = (await checkpointVm(policy, session, 'before restarting the VM on a new build')).snapshot
   await vmDown(workdir)
   if (!session || !at) {
     console.error('envgit: stopped a VM from an older build')
@@ -499,6 +483,20 @@ async function restartIfStale(policy: Policy, opts: { up?: boolean } = {}): Prom
   reportMirror(await vm.syncMirror())
   console.error(`envgit: restarted the VM on the current build in ${((Date.now() - t0) / 1000).toFixed(1)}s, resumed at a checkpoint of session ${session.meta.id}`)
   return true
+}
+
+/** Records the running guest as a `ckpt` step: what background processes did since the last step. */
+async function checkpointVm(policy: Policy, session: OpenSession, reason: string) {
+  const vm = new VmBackend()
+  await vm.create({ workdir: process.cwd() })
+  await acquireBusy(ROOT)
+  try {
+    const now = new Date().toISOString()
+    const { step } = await recordVmStep(session, snapshotting(policy), vm, { startedAt: now, endedAt: now, action: { type: 'checkpoint', input: reason }, exitCode: 0, effects: [] })
+    return step
+  } finally {
+    await releaseBusy(ROOT)
+  }
 }
 
 async function currentVmSession(): Promise<OpenSession | undefined> {
@@ -589,9 +587,22 @@ async function vmCmd(args: string[]): Promise<number> {
       console.error(`envgit: vm up in ${((Date.now() - t0) / 1000).toFixed(1)}s, session ${session.meta.id}; the workdir is now a read-only mirror of the VM's /work`)
       return 0
     }
-    case 'down':
-      console.error((await vmDown(workdir)) ? 'envgit: vm stopped; its snapshots stay in .envgit/vm/snaps and `envgit vm up` resumes the session' : 'envgit: vm was not running')
+    case 'down': {
+      // Keep what the guest did since the last step (background processes run on): checkpoint it first,
+      // when the session can resume from it at all (same L2 images, a guest running).
+      let ckpt = ''
+      if (await vmClientAlive(workdir)) {
+        const busy = await busyHolder(ROOT)
+        if (busy !== undefined) throw new Error(`vm: a step is running here (pid ${busy}); wait for it to finish, then stop the VM`)
+        const session = await currentVmSession()
+        const status = await new VmClient(vmPaths(workdir).socket).call({ op: 'status' }).catch(() => undefined)
+        if (session && status?.msg.current && session.meta.vmImage === (await vmImageStamp())) {
+          ckpt = ` at checkpoint step ${(await checkpointVm(policy, session, 'before vm down')).index}`
+        }
+      }
+      console.error((await vmDown(workdir)) ? `envgit: vm stopped${ckpt}; its snapshots stay in .envgit/vm/snaps and \`envgit vm up\` resumes the session` : 'envgit: vm was not running')
       return 0
+    }
     case 'status': {
       const client = new VmClient(vmPaths(workdir).socket)
       if (!(await client.alive())) {

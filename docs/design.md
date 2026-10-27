@@ -141,7 +141,9 @@ envgit (TS) ──unix socket── envgit-vm (Swift, Virtualization.framework) 
 
 - **Lifetime:** `envgit vm up` boots L1 and either resumes the current vm session at its head (from
   the snapshots on the host) or, with no such session or `--new`, boots a fresh L2 and imports the
-  workdir; `envgit vm down` stops both and loses nothing. `rewind` boots the VM itself if it is down.
+  workdir; `envgit vm down` first checkpoints the guest as a step (`ckpt`, "before vm down": what
+  background processes did since the last step), then stops both, so it loses nothing and `vm up`
+  resumes at that checkpoint. `rewind` boots the VM itself if it is down.
   `run` against a live VM costs one exec round trip, one diff snapshot and an incremental mirror sync.
   `scripts/vm/build.sh` writes a stamp of its output and `vm up` records the stamp it booted; when
   they differ (a rebuild since), `vm up`, `run` and `push` checkpoint the guest as a step (`ckpt` in
