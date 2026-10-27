@@ -1,13 +1,24 @@
 #!/bin/sh
-# Builds the VM backend artifacts (docs/design.md §3.6) from the pinned downloads:
+# Builds the VM backend artifacts (docs/design.md §3.6) from the pinned downloads.
+#
+# macOS (nested: envgit-vm boots L1, L1 runs Firecracker):
 #   build/envgit-vm         Swift helper (Virtualization.framework), ad-hoc signed
 #   build/Image             L1 kernel (Ubuntu generic, uncompressed)
 #   build/l1-initrd.cpio    L1 supervisor + Firecracker + L2 kernel/initrd + vsock/virtiofs modules
+# Linux (arm64; the supervisor runs on the host and Firecracker uses the host's KVM directly):
+#   build/envgit-supervisor the same supervisor, in host mode
+#   build/fc/               firecracker, rebase-snap, L2 kernel (vmlinux) and initrd
+# Both:
 #   build/rootfs.squashfs   L2's root: Ubuntu 24.04 server cloud image (git, python3, curl, ...)
 #   build/layer.squashfs    Node, overlaid on the root under /usr/local
 #   build/image-stamp       hash of the two images; a session only resumes on the image it began on
-#   build/stamp             hash of everything above; a VM booted from another build is restarted
+#   build/stamp             hash of everything above; a VM started from another build is restarted
 #   build/base/             prebuilt full snapshot of a warmed-up guest; new sessions restore it
+#
+#   scripts/vm/build.sh                       build for this machine
+#   scripts/vm/build.sh --linux-layout DIR    (macOS) also lay out a Linux build in DIR/build from
+#                                             this one, for scripts/vm/linux-test.sh; its base
+#                                             snapshot is made inside the test VM
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -17,16 +28,21 @@ DL="$ROOT/downloads"
 OUT="$ROOT/build"
 WORK="$ROOT/work"
 KVER=6.8.0-147-generic
+OS=$(uname -s)
+case "$(uname -m)" in
+  arm64|aarch64) ;;
+  *) echo "the vm backend is built for arm64 only so far (this is $(uname -m))" >&2; exit 1 ;;
+esac
+[ "$OS" = Darwin ] || [ "$OS" = Linux ] || { echo "unsupported OS: $OS" >&2; exit 1; }
+LINUX_LAYOUT=""
+[ "${1:-}" = "--linux-layout" ] && LINUX_LAYOUT="${2:?--linux-layout needs a directory}"
+NODE_TAR=node-v24.21.0-linux-arm64.tar.xz
+sha() { if command -v shasum >/dev/null; then shasum -a 256; else sha256sum; fi; }
+stamp() { (cd "$1" && shift && cat "$@" | sha | cut -c1-16); }
+clone() { if [ "$OS" = Darwin ]; then cp -c "$1" "$2"; else cp --reflink=auto "$1" "$2"; fi; }
 
 "$HERE/fetch.sh"
 mkdir -p "$OUT" "$WORK"
-
-echo "swift helper"
-swiftc -O -o "$OUT/envgit-vm" "$REPO/vm/helper/envgit-vm.swift"
-codesign -f -s - --entitlements "$REPO/vm/helper/envgit-vm.entitlements" "$OUT/envgit-vm"
-
-echo "L1 kernel"
-gunzip -c "$DL/ubuntu-vmlinuz-generic" > "$OUT/Image"
 
 echo "guest binaries"
 (cd "$REPO/vm/guest" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o "$WORK/l1-init" ./cmd/l1 \
@@ -37,39 +53,71 @@ rm -rf "$WORK/l2root" && mkdir -p "$WORK/l2root/dev" "$WORK/l2root/proc" "$WORK/
 cp "$WORK/l2-init" "$WORK/l2root/init"
 (cd "$WORK/l2root" && find . | cpio -o -H newc 2>/dev/null) > "$WORK/l2-initrd.cpio"
 
-echo "vsock + virtiofs modules"
-rm -rf "$WORK/deb" && mkdir -p "$WORK/deb" && (cd "$WORK/deb" && ar x "$DL/linux-modules-${KVER}_arm64.deb" \
-  && tar -xf data.tar "./lib/modules/$KVER/kernel/net/vmw_vsock/vsock.ko.zst" \
-     "./lib/modules/$KVER/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.zst" \
-     "./lib/modules/$KVER/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko.zst" \
-     "./lib/modules/$KVER/kernel/fs/fuse/virtiofs.ko.zst")
-
-echo "L1 initrd"
-rm -rf "$WORK/l1root" && mkdir -p "$WORK/l1root/fc" "$WORK/l1root/modules" "$WORK/l1root/dev" "$WORK/l1root/proc" "$WORK/l1root/sys" "$WORK/l1root/tmp"
-cp "$WORK/l1-init" "$WORK/l1root/init"
 rm -rf "$WORK/fc" && mkdir -p "$WORK/fc" && tar -xzf "$DL/firecracker-v1.17.0-aarch64.tgz" -C "$WORK/fc"
-cp "$WORK/fc/release-v1.17.0-aarch64/firecracker-v1.17.0-aarch64" "$WORK/l1root/fc/firecracker"
-cp "$WORK/fc/release-v1.17.0-aarch64/rebase-snap-v1.17.0-aarch64" "$WORK/l1root/fc/rebase-snap"
-cp "$DL/vmlinux-6.18.54" "$WORK/l1root/fc/vmlinux"
-cp "$WORK/l2-initrd.cpio" "$WORK/l1root/fc/l2-initrd.cpio"
-for m in net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common net/vmw_vsock/vmw_vsock_virtio_transport fs/fuse/virtiofs; do
-  zstd -qdf "$WORK/deb/lib/modules/$KVER/kernel/$m.ko.zst" -o "$WORK/l1root/modules/$(basename $m).ko"
-done
-(cd "$WORK/l1root" && find . | cpio -o -H newc 2>/dev/null) > "$OUT/l1-initrd.cpio"
+# Firecracker's side, in the layout the supervisor's --fc expects (L1 has it at /fc).
+fcdir() {
+  rm -rf "$1" && mkdir -p "$1"
+  cp "$WORK/fc/release-v1.17.0-aarch64/firecracker-v1.17.0-aarch64" "$1/firecracker"
+  cp "$WORK/fc/release-v1.17.0-aarch64/rebase-snap-v1.17.0-aarch64" "$1/rebase-snap"
+  cp "$DL/vmlinux-6.18.54" "$1/vmlinux"
+  cp "$WORK/l2-initrd.cpio" "$1/l2-initrd.cpio"
+}
+# A Linux build's files in $1: supervisor, fc/, and the stamp over them and the images.
+linux_bits() {
+  cp "$WORK/l1-init" "$1/envgit-supervisor"
+  fcdir "$1/fc"
+}
+linux_stamp() { stamp "$1" envgit-supervisor fc/firecracker fc/rebase-snap fc/vmlinux fc/l2-initrd.cpio image-stamp > "$1/stamp"; }
+
+if [ "$OS" = Darwin ]; then
+  echo "swift helper"
+  swiftc -O -o "$OUT/envgit-vm" "$REPO/vm/helper/envgit-vm.swift"
+  codesign -f -s - --entitlements "$REPO/vm/helper/envgit-vm.entitlements" "$OUT/envgit-vm"
+
+  echo "L1 kernel"
+  gunzip -c "$DL/ubuntu-vmlinuz-generic" > "$OUT/Image"
+
+  echo "vsock + virtiofs modules"
+  rm -rf "$WORK/deb" && mkdir -p "$WORK/deb" && (cd "$WORK/deb" && ar x "$DL/linux-modules-${KVER}_arm64.deb" \
+    && tar -xf data.tar "./lib/modules/$KVER/kernel/net/vmw_vsock/vsock.ko.zst" \
+       "./lib/modules/$KVER/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.zst" \
+       "./lib/modules/$KVER/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko.zst" \
+       "./lib/modules/$KVER/kernel/fs/fuse/virtiofs.ko.zst")
+
+  echo "L1 initrd"
+  rm -rf "$WORK/l1root" && mkdir -p "$WORK/l1root/modules" "$WORK/l1root/dev" "$WORK/l1root/proc" "$WORK/l1root/sys" "$WORK/l1root/tmp"
+  cp "$WORK/l1-init" "$WORK/l1root/init"
+  fcdir "$WORK/l1root/fc"
+  for m in net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common net/vmw_vsock/vmw_vsock_virtio_transport fs/fuse/virtiofs; do
+    zstd -qdf "$WORK/deb/lib/modules/$KVER/kernel/$m.ko.zst" -o "$WORK/l1root/modules/$(basename $m).ko"
+  done
+  (cd "$WORK/l1root" && find . | cpio -o -H newc 2>/dev/null) > "$OUT/l1-initrd.cpio"
+else
+  echo "supervisor + firecracker"
+  linux_bits "$OUT"
+fi
 
 echo "L2 images"
 # Attached as disks rather than packed into the initrd, so they are read on demand, not loaded into RAM.
-cp -c "$DL/ubuntu-24.04-server-cloudimg-arm64-20260926.squashfs" "$OUT/rootfs.squashfs.part" && mv "$OUT/rootfs.squashfs.part" "$OUT/rootfs.squashfs"
-NODE_TAR=node-v24.21.0-linux-arm64.tar.xz
-LAYER_KEY=$( (cat "$OUT/rootfs.squashfs" "$DL/$NODE_TAR"; echo layer-v1) | shasum -a 256 | cut -c1-16)
+clone "$DL/ubuntu-24.04-server-cloudimg-arm64-20260926.squashfs" "$OUT/rootfs.squashfs.part" && mv "$OUT/rootfs.squashfs.part" "$OUT/rootfs.squashfs"
+LAYER_KEY=$( (cat "$OUT/rootfs.squashfs" "$DL/$NODE_TAR"; echo layer-v1) | sha | cut -c1-16)
 if [ "$(cat "$WORK/layer.key" 2>/dev/null)" = "$LAYER_KEY" ] && [ -s "$OUT/layer.squashfs" ]; then
   echo "ok       layer.squashfs"
+elif [ "$OS" = Linux ]; then
+  command -v mksquashfs >/dev/null || { echo "mksquashfs not found: install squashfs-tools" >&2; exit 1; }
+  echo "building layer.squashfs"
+  S="$WORK/layer-src" && rm -rf "$S" && mkdir -p "$S/usr/local"
+  tar -xJf "$DL/$NODE_TAR" -C "$S/usr/local" --strip-components 1
+  rm -f "$S/usr/local/CHANGELOG.md" "$S/usr/local/README.md"
+  mksquashfs "$S" "$OUT/layer.squashfs" -comp gzip -all-root -noappend -quiet
+  rm -rf "$S"
+  echo "$LAYER_KEY" > "$WORK/layer.key"
 else
   # macOS has no mksquashfs, but the rootfs does: boot it bare (an empty layer) in a throwaway workdir
   # and let L2 pack Node, with every file owned by root.
   echo "building layer.squashfs in the VM"
   : > "$OUT/layer.squashfs" && dd if=/dev/zero of="$OUT/layer.squashfs" bs=4096 count=1 2>/dev/null
-  (cd "$OUT" && cat envgit-vm Image l1-initrd.cpio | shasum -a 256 | cut -c1-16) > "$OUT/stamp"
+  stamp "$OUT" envgit-vm Image l1-initrd.cpio > "$OUT/stamp"
   BOOT="$WORK/layer-build" && rm -rf "$BOOT" && mkdir -p "$BOOT"
   cp "$DL/$NODE_TAR" "$BOOT/node.tar.xz"
   envgit() { (cd "$BOOT" && node "$REPO/dist/cli/index.js" "$@"); }
@@ -85,8 +133,8 @@ else
   echo "$LAYER_KEY" > "$WORK/layer.key"
   rm -rf "$BOOT"
 fi
-(cd "$OUT" && cat rootfs.squashfs layer.squashfs | shasum -a 256 | cut -c1-16) > "$OUT/image-stamp"
-(cd "$OUT" && cat envgit-vm Image l1-initrd.cpio image-stamp | shasum -a 256 | cut -c1-16) > "$OUT/stamp"
+stamp "$OUT" rootfs.squashfs layer.squashfs > "$OUT/image-stamp"
+if [ "$OS" = Darwin ]; then stamp "$OUT" envgit-vm Image l1-initrd.cpio image-stamp > "$OUT/stamp"; else linux_stamp "$OUT"; fi
 
 # A cold-booted L2 pays ≈ 250 µs for every page it touches first, a restored one far less: boot one
 # guest here, let it run node/python/git once, and keep its full snapshot for new sessions to restore.
@@ -101,5 +149,13 @@ else
     && node "$REPO/dist/cli/index.js" vm prebuild "$OUT/base.part") || { echo "base snapshot failed" >&2; exit 1; }
   mv "$OUT/base.part" "$OUT/base"
   rm -rf "$BOOT"
+fi
+
+if [ -n "$LINUX_LAYOUT" ]; then
+  echo "Linux layout in $LINUX_LAYOUT/build"
+  L="$LINUX_LAYOUT/build" && mkdir -p "$L"
+  linux_bits "$L"
+  for f in rootfs.squashfs layer.squashfs image-stamp; do rm -f "$L/$f"; clone "$OUT/$f" "$L/$f"; done
+  linux_stamp "$L"
 fi
 ls -la "$OUT" "$OUT/base"

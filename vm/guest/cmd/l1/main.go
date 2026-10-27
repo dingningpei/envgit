@@ -10,6 +10,12 @@
 //
 // Egress: L2's proxy connections to the host arrive on Firecracker's vsock UDS for port 3128 and are
 // passed on, one vsock connection each, to the host (envgit-vm), which hands them to envgit.
+//
+// Host mode (Linux): when not PID 1 the same supervisor runs as an ordinary process on a Linux host
+// with KVM, started by envgit with flags (see hostMain). Nothing is nested then: requests arrive on a
+// unix socket instead of vsock, snapshots go straight to the workdir's .envgit/vm/snaps, egress goes
+// straight to envgit's proxy socket, and each Firecracker runs with a per-VM directory as its cwd and
+// relative drive and vsock paths, so snapshots — the prebuilt base too — restore in any workdir.
 package main
 
 import (
@@ -33,6 +39,10 @@ import (
 	"syscall"
 	"time"
 
+	"flag"
+	"os/signal"
+	"path/filepath"
+
 	"envgit/vm/guest/proto"
 	"envgit/vm/guest/splice"
 	"envgit/vm/guest/vsock"
@@ -43,10 +53,23 @@ import (
 const (
 	hostPort  = 1024
 	agentPort = 1024
-	vsockUDS  = "/tmp/v.sock"
-	snapDir   = "/tmp/snaps" // in flight, and the cached base memory
-	hostDir   = "/host"      // virtiofs share of <workdir>/.envgit/vm/snaps
-	proxyPort = 3128         // L2 → host egress tunnel, same number on every hop
+	proxyPort = 3128 // L2 → host egress tunnel, same number on every hop
+)
+
+// Paths. The defaults are L1's, and snapshots taken there record them (/dev/vda, /tmp/v.sock), so
+// they must not change; host mode overrides them all.
+var (
+	run       = "/tmp"        // Firecracker API sockets and scratch files
+	vsockUDS  = "/tmp/v.sock" // where this supervisor reaches Firecracker's vsock
+	snapDir   = "/tmp/snaps"  // in flight, and the cached base memory
+	hostDir   = "/host"       // virtiofs share of <workdir>/.envgit/vm/snaps
+	fcDir     = "/fc"         // firecracker, rebase-snap, vmlinux, l2-initrd.cpio
+	fcVsock   = "/tmp/v.sock" // the vsock uds_path Firecracker is configured with
+	fcRootfs  = "/dev/vda"    // drive paths Firecracker is configured with
+	fcLayer   = "/dev/vdb"
+	fcCwd     = "" // Firecracker's working directory (host mode: run, for the relative paths)
+	proxySock = "" // host mode: envgit's egress proxy socket
+	hostMode  = false
 )
 
 func logf(f string, a ...any) { fmt.Printf("[l1] "+f+"\n", a...) }
@@ -63,9 +86,14 @@ type supervisor struct {
 	base    string // full snapshot at the root of the running guest's chain
 	current string // snapshot the running guest descends from
 	l2mem   int
+	exit    func(code int) // host mode: how shutdown ends the process (L1 powers off)
 }
 
 func main() {
+	if os.Getpid() != 1 {
+		hostMain()
+		return
+	}
 	for _, m := range [][3]string{{"proc", "/proc", "proc"}, {"sysfs", "/sys", "sysfs"}, {"devtmpfs", "/dev", "devtmpfs"}} {
 		_ = os.MkdirAll(m[1], 0o755)
 		_ = syscall.Mount(m[0], m[1], m[2], 0, "")
@@ -97,6 +125,80 @@ func main() {
 		}
 		go s.serve(c)
 	}
+}
+
+// hostMain is host mode: envgit starts it detached and talks to it on --socket.
+func hostMain() {
+	socket := flag.String("socket", "", "unix socket envgit connects to")
+	flag.StringVar(&hostDir, "share", "", "the workdir's .envgit/vm/snaps")
+	flag.StringVar(&proxySock, "proxy-socket", "", "envgit's egress proxy socket")
+	flag.StringVar(&run, "run", "", "per-VM scratch directory (short: it holds unix sockets)")
+	flag.StringVar(&fcDir, "fc", "", "directory with firecracker, rebase-snap, vmlinux, l2-initrd.cpio")
+	rootfs := flag.String("rootfs", "", "L2's root image")
+	layer := flag.String("layer", "", "L2's layer image")
+	l2mem := flag.Int("l2mem", 1024, "L2 memory, MiB")
+	flag.Parse()
+	if *socket == "" || hostDir == "" || proxySock == "" || run == "" || fcDir == "" || *rootfs == "" || *layer == "" {
+		flag.Usage()
+		os.Exit(2)
+	}
+	hostMode = true
+	vsockUDS, snapDir = filepath.Join(run, "v.sock"), filepath.Join(run, "snaps")
+	fcVsock, fcRootfs, fcLayer, fcCwd = "v.sock", "rootfs", "layer", run
+	cleanRun()
+	for _, d := range []string{run, snapDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			logf("%v", err)
+			os.Exit(1)
+		}
+	}
+	for name, target := range map[string]string{"rootfs": *rootfs, "layer": *layer} {
+		if err := os.Symlink(target, filepath.Join(run, name)); err != nil {
+			logf("%v", err)
+			os.Exit(1)
+		}
+	}
+	s := &supervisor{l2mem: *l2mem}
+	go egress()
+	_ = os.Remove(*socket)
+	ln, err := net.Listen("unix", *socket)
+	if err != nil {
+		logf("listen: %v", err)
+		os.Exit(1)
+	}
+	stop := func(code int) {
+		s.mu.Lock() // let an operation in flight finish
+		if s.fc != nil {
+			s.fc.kill()
+		}
+		_ = os.Remove(*socket)
+		cleanRun()
+		os.Exit(code)
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	go func() { <-sig; stop(0) }()
+	s.exit = stop
+	logf("ready")
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+		go s.serve(c)
+	}
+}
+
+// cleanRun removes what host mode keeps in run — only that, since run comes from the command line.
+func cleanRun() {
+	_ = os.RemoveAll(snapDir)
+	for _, pat := range []string{"fc*.sock", "v.sock*", "state-*", "merged.mem", "diff.mem", "rootfs", "layer"} {
+		m, _ := filepath.Glob(filepath.Join(run, pat))
+		for _, f := range m {
+			_ = os.Remove(f)
+		}
+	}
+	_ = os.Remove(run) // only if now empty
 }
 
 func cmdlineInt(key string, def int) int {
@@ -142,7 +244,10 @@ type firecracker struct {
 func startFirecracker(sock string) (*firecracker, error) {
 	_ = os.Remove(sock)
 	_ = os.Remove(vsockUDS)
-	cmd := exec.Command("/fc/firecracker", "--api-sock", sock, "--level", "Warning")
+	cmd := exec.Command(fcDir+"/firecracker", "--api-sock", sock, "--level", "Warning")
+	cmd.Dir = fcCwd
+	// On a Linux host a supervisor that dies must not leave a 1 GiB guest behind.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	stdout, _ := cmd.StdoutPipe()
 	cmd.Stderr = os.Stdout
 	if err := cmd.Start(); err != nil {
@@ -247,17 +352,18 @@ func (s *supervisor) boot(warm []string) error {
 		s.fc.kill()
 		s.fc = nil
 	}
-	fc, err := startFirecracker("/tmp/fc.sock")
+	fc, err := startFirecracker(run + "/fc.sock")
 	if err != nil {
 		return err
 	}
 	for _, c := range [][3]string{
 		{"PUT", "/machine-config", fmt.Sprintf(`{"vcpu_count":2,"mem_size_mib":%d,"track_dirty_pages":true}`, s.l2mem)},
-		{"PUT", "/boot-source", `{"kernel_image_path":"/fc/vmlinux","initrd_path":"/fc/l2-initrd.cpio","boot_args":"console=ttyS0 reboot=k panic=1 rdinit=/init"}`},
-		// L1's own read-only disks (envgit-vm attaches them): L2 sees them as vda and vdb.
-		{"PUT", "/drives/rootfs", `{"drive_id":"rootfs","path_on_host":"/dev/vda","is_root_device":false,"is_read_only":true}`},
-		{"PUT", "/drives/layer", `{"drive_id":"layer","path_on_host":"/dev/vdb","is_root_device":false,"is_read_only":true}`},
-		{"PUT", "/vsock", `{"guest_cid":3,"uds_path":"` + vsockUDS + `"}`},
+		{"PUT", "/boot-source", `{"kernel_image_path":"` + fcDir + `/vmlinux","initrd_path":"` + fcDir + `/l2-initrd.cpio","boot_args":"console=ttyS0 reboot=k panic=1 rdinit=/init"}`},
+		// L1's own read-only disks (envgit-vm attaches them), or the images on a Linux host: L2 sees
+		// them as vda and vdb.
+		{"PUT", "/drives/rootfs", `{"drive_id":"rootfs","path_on_host":"` + fcRootfs + `","is_root_device":false,"is_read_only":true}`},
+		{"PUT", "/drives/layer", `{"drive_id":"layer","path_on_host":"` + fcLayer + `","is_root_device":false,"is_read_only":true}`},
+		{"PUT", "/vsock", `{"guest_cid":3,"uds_path":"` + fcVsock + `"}`},
 		{"PUT", "/actions", `{"action_type":"InstanceStart"}`},
 	} {
 		if err := fc.api(c[0], c[1], c[2]); err != nil {
@@ -551,24 +657,24 @@ func (s *supervisor) restore(id string) error {
 		}
 	}
 	if len(chain) > 1 {
-		merged := "/tmp/merged.mem"
+		merged := run + "/merged.mem"
 		_ = os.Remove(merged)
 		if err := copyFile(mem, merged); err != nil {
 			return fmt.Errorf("copy base memory: %v", err)
 		}
-		diff := "/tmp/diff.mem"
+		diff := run + "/diff.mem"
 		for _, sn := range chain[1:] {
 			if err := unpackMem(sn.ID, diff); err != nil {
 				return fmt.Errorf("load diff %s: %v", sn.ID, err)
 			}
-			if out, err := exec.Command("/fc/rebase-snap", "--base-file", merged, "--diff-file", diff).CombinedOutput(); err != nil {
+			if out, err := exec.Command(fcDir+"/rebase-snap", "--base-file", merged, "--diff-file", diff).CombinedOutput(); err != nil {
 				return fmt.Errorf("rebase-snap: %v %s", err, out)
 			}
 		}
 		_ = os.Remove(diff)
 		mem = merged
 	}
-	state := "/tmp/state-" + id
+	state := run + "/state-" + id
 	if err := copyPlain(hostDir+"/"+id+"/state", state); err != nil {
 		return err
 	}
@@ -577,7 +683,7 @@ func (s *supervisor) restore(id string) error {
 		s.fc.kill()
 		s.fc = nil
 	}
-	fc, err := startFirecracker(fmt.Sprintf("/tmp/fc-%s.sock", id))
+	fc, err := startFirecracker(fmt.Sprintf("%s/fc-%s.sock", run, id))
 	if err != nil {
 		return err
 	}
@@ -689,6 +795,9 @@ func (s *supervisor) serve(c io.ReadWriteCloser) {
 	case "shutdown":
 		_ = proto.Write(c, proto.Msg{Op: "bye"})
 		c.Close()
+		if s.exit != nil {
+			s.exit(0)
+		}
 		if s.fc != nil {
 			s.fc.kill()
 		}
@@ -746,9 +855,15 @@ func egress() {
 			continue
 		}
 		go func() {
-			up, err := vsock.Dial(unix.VMADDR_CID_HOST, proxyPort)
+			var up io.ReadWriteCloser
+			var err error
+			if hostMode {
+				up, err = net.Dial("unix", proxySock)
+			} else {
+				up, err = vsock.Dial(unix.VMADDR_CID_HOST, proxyPort)
+			}
 			if err != nil {
-				// envgit-vm refuses while no envgit step is serving the proxy.
+				// Nothing listens (envgit-vm refuses) while no envgit step is serving the proxy.
 				splice.Refuse(c)
 				return
 			}

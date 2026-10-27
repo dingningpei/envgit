@@ -20,16 +20,21 @@ ubuntu-24.04-server-cloudimg-arm64-20260926.squashfs|$NOBLE/ubuntu-24.04-server-
 node-v24.21.0-linux-arm64.tar.xz|https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.xz|6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2
 "
 
+# The L1 kernel and its modules are only needed on macOS, where L1 is a VM; on Linux the host is L1.
+L1_ONLY="ubuntu-vmlinuz-generic linux-modules-6.8.0-147-generic_arm64.deb"
+check() { if command -v shasum >/dev/null; then shasum -a 256 -c - >/dev/null 2>&1; else sha256sum -c - >/dev/null 2>&1; fi; }
+
 echo "$FILES" | while IFS='|' read -r name url sum; do
   [ -n "$name" ] || continue
+  if [ "$(uname -s)" = Linux ]; then case " $L1_ONLY " in *" $name "*) continue ;; esac; fi
   url=$(eval echo "$url")
   dst="$DL/$name"
-  if [ -f "$dst" ] && echo "$sum  $dst" | shasum -a 256 -c - >/dev/null 2>&1; then
+  if [ -f "$dst" ] && echo "$sum  $dst" | check; then
     echo "ok       $name"
     continue
   fi
   echo "fetching $name"
   curl -fsSL -o "$dst.part" "$url"
-  echo "$sum  $dst.part" | shasum -a 256 -c - >/dev/null || { echo "checksum mismatch: $name" >&2; rm -f "$dst.part"; exit 1; }
+  echo "$sum  $dst.part" | check || { echo "checksum mismatch: $name" >&2; rm -f "$dst.part"; exit 1; }
   mv "$dst.part" "$dst"
 done

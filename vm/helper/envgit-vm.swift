@@ -3,6 +3,7 @@
 //
 //   envgit-vm --kernel Image --initrd l1-initrd.cpio --rootfs rootfs.squashfs --layer layer.squashfs
 //             --socket path --share dir --proxy-socket path [--cpus 4] [--mem 4096] [--l2mem 1024]
+//             [--share-repo dir] [--cmdline "k=v ..."]
 //
 // The two images are attached read-only as L1's /dev/vda and /dev/vdb, which L1 passes to L2's
 // Firecracker as its drives: L2's root is the rootfs with the layer (Node) on top.
@@ -11,7 +12,8 @@
 // every snapshot there. Guest connections to vsock port 3128 (L2's egress, via L1) are joined to the
 // unix socket `--proxy-socket`, which envgit serves only while a step runs; when nothing is listening
 // the connection is refused and L1 answers the client with an envgit 503. The L1 console goes to
-// stdout. The process exits when the guest stops.
+// stdout. The process exits when the guest stops. `--share-repo` (tag "repo") and `--cmdline` are for
+// scripts/vm/linux-test.sh, which boots a Linux test VM rather than L1.
 import Foundation
 import Virtualization
 
@@ -34,7 +36,7 @@ if kernel.isEmpty || initrd.isEmpty || socketPath.isEmpty || sharePath.isEmpty |
 
 let boot = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: kernel))
 boot.initialRamdiskURL = URL(fileURLWithPath: initrd)
-boot.commandLine = "console=hvc0 quiet envgit.l2mem=\(opts["--l2mem"] ?? "1024")"
+boot.commandLine = "console=hvc0 quiet envgit.l2mem=\(opts["--l2mem"] ?? "1024") \(opts["--cmdline"] ?? "")"
 
 let config = VZVirtualMachineConfiguration()
 config.bootLoader = boot
@@ -56,6 +58,11 @@ config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
 let share = VZVirtioFileSystemDeviceConfiguration(tag: "envgit")
 share.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: sharePath), readOnly: false))
 config.directorySharingDevices = [share]
+if let repo = opts["--share-repo"] {
+  let r = VZVirtioFileSystemDeviceConfiguration(tag: "repo")
+  r.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: repo), readOnly: false))
+  config.directorySharingDevices.append(r)
+}
 do {
   config.storageDevices = try [rootfsPath, layerPath].map { path in
     VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: path), readOnly: true))

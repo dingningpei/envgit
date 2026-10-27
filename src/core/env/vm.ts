@@ -1,7 +1,7 @@
 /** VM backend: nested Firecracker inside a Virtualization-framework microVM. See docs/design.md §3.6 */
 import { execFile, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, constants, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { access, chmod, constants, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -101,28 +101,44 @@ export function vmPaths(workdir: string): VmPaths {
 }
 
 /**
- * Boots L1 if it is not running and waits for its supervisor. L1 starts with no L2 guest: follow with
- * `VmBackend.boot()` for a fresh one or `restore()` to resume a snapshot. Returns false if it was already up.
+ * Starts the supervisor if it is not running and waits for it: on macOS it is L1, booted by envgit-vm;
+ * on Linux it runs directly on the host (host mode), with Firecracker on the host's KVM. It starts with
+ * no L2 guest: follow with `VmBackend.boot()` for a fresh one or `restore()` to resume a snapshot.
+ * Returns false if it was already up.
  */
 export async function vmUp(workdir: string, opts: { cpus?: number; mem?: number; l2mem?: number } = {}): Promise<boolean> {
   const p = vmPaths(workdir)
   const client = new VmClient(p.socket)
   if (await client.alive()) return false
-  for (const f of ['envgit-vm', 'Image', 'l1-initrd.cpio', 'rootfs.squashfs', 'layer.squashfs']) {
+  const linux = process.platform === 'linux'
+  const files = linux
+    ? ['envgit-supervisor', 'fc/firecracker', 'fc/rebase-snap', 'fc/vmlinux', 'fc/l2-initrd.cpio', 'rootfs.squashfs', 'layer.squashfs']
+    : ['envgit-vm', 'Image', 'l1-initrd.cpio', 'rootfs.squashfs', 'layer.squashfs']
+  for (const f of files) {
     await stat(join(p.build, f)).catch(() => {
       throw new Error(`vm: ${join(p.build, f)} is missing — run scripts/vm/build.sh`)
+    })
+  }
+  if (linux) {
+    await access('/dev/kvm', constants.R_OK | constants.W_OK).catch(() => {
+      throw new Error('vm: /dev/kvm is missing or not usable by this user — the vm backend needs KVM (add yourself to the kvm group)')
     })
   }
   await mkdir(dirname(p.socket), { recursive: true })
   await mkdir(p.snaps, { recursive: true })
   const log = await open(join(p.state, 'console.log'), 'w')
-  const child = spawn(
-    join(p.build, 'envgit-vm'),
-    ['--kernel', join(p.build, 'Image'), '--initrd', join(p.build, 'l1-initrd.cpio'),
-     '--rootfs', join(p.build, 'rootfs.squashfs'), '--layer', join(p.build, 'layer.squashfs'), '--socket', p.socket, '--share', p.snaps, '--proxy-socket', p.proxy,
-     '--cpus', String(opts.cpus ?? 4), '--mem', String(opts.mem ?? 4096), '--l2mem', String(opts.l2mem ?? 1024)],
-    { detached: true, stdio: ['ignore', log.fd, log.fd] },
-  )
+  const images = ['--rootfs', join(p.build, 'rootfs.squashfs'), '--layer', join(p.build, 'layer.squashfs'), '--socket', p.socket, '--share', p.snaps, '--proxy-socket', p.proxy]
+  const l2mem = ['--l2mem', String(opts.l2mem ?? 1024)]
+  const child = linux
+    ? spawn(join(p.build, 'envgit-supervisor'), [...images, ...l2mem, '--fc', join(p.build, 'fc'), '--run', p.socket.replace(/\.sock$/, '.d')], {
+        detached: true,
+        stdio: ['ignore', log.fd, log.fd],
+      })
+    : spawn(
+        join(p.build, 'envgit-vm'),
+        ['--kernel', join(p.build, 'Image'), '--initrd', join(p.build, 'l1-initrd.cpio'), ...images, '--cpus', String(opts.cpus ?? 4), '--mem', String(opts.mem ?? 4096), ...l2mem],
+        { detached: true, stdio: ['ignore', log.fd, log.fd] },
+      )
   child.unref()
   await log.close()
   await writeFile(join(p.state, 'helper.pid'), `${child.pid}\n`)
@@ -133,7 +149,7 @@ export async function vmUp(workdir: string, opts: { cpus?: number; mem?: number;
     if (child.exitCode !== null) break
     await new Promise(r => setTimeout(r, 500))
   }
-  throw new Error(`vm: L1 did not come up; see ${join(p.state, 'console.log')}`)
+  throw new Error(`vm: the supervisor did not come up; see ${join(p.state, 'console.log')}`)
 }
 
 /** Identifies the build in `scripts/vm/build.sh`'s output; empty for a build from before stamps. */

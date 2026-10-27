@@ -46,7 +46,9 @@ capabilities:
     )
     expect((await envgit('vm', 'up')).stderr).toMatch(/vm up in/)
     client = new Client({ name: 'envgit-test', version: '0' })
-    await client.connect(new StdioClientTransport({ command: process.execPath, args: [CLI, 'mcp'], cwd: dir, stderr: 'ignore' }))
+    // The SDK passes the child only a few variables by default; ENVGIT_VM_DIR (if set) must reach it.
+    const env = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined))
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [CLI, 'mcp'], cwd: dir, env, stderr: 'ignore' }))
   }, 180_000)
 
   afterAll(async () => {

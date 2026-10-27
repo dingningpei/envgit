@@ -120,7 +120,7 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
   rewrite its own history. `snapshot.exclude` in the policy leaves more paths out.
 - Limits: files only, no memory or processes — that needs the VM tier.
 
-### 3.6 VM backend on macOS: nested Firecracker (`src/core/env/vm.ts`, `vm/`)
+### 3.6 VM backend: Firecracker, nested on macOS, direct on Linux (`src/core/env/vm.ts`, `vm/`)
 
 Memory + process + file snapshots, from the spike in [`spike-nested-firecracker.md`](spike-nested-firecracker.md).
 
@@ -205,6 +205,28 @@ sparse version, rebuilt from the packed copy);
   guest's clock is wherever its snapshot left it (TLS checks fail otherwise).
 - **Protocol:** one framed protocol on both hops — a 4-byte length + JSON header, optionally followed
   by a byte stream (files, tar).
+- **On Linux (arm64), no nesting:** the same supervisor binary runs on the host as an ordinary
+  process (host mode, chosen when it is not PID 1): `vm up` starts it detached with the paths as
+  flags, after checking `/dev/kvm` is usable; it listens on the workdir's unix socket instead of
+  vsock, writes snapshots straight to `.envgit/vm/snaps`, and joins L2's egress connections straight
+  to envgit's proxy socket. Every Firecracker runs with a per-VM directory as its working directory
+  and is configured with relative paths (`rootfs`, `layer` — symlinks to the images — and `v.sock`),
+  because a snapshot records them: so the prebuilt base and any session's snapshots restore in any
+  workdir, and several VMs on one host do not collide. L1 keeps its absolute paths (`/dev/vda`,
+  `/tmp/v.sock`), so existing macOS snapshots still load. Firecracker gets `PR_SET_PDEATHSIG`, so a
+  dead supervisor does not leave a guest behind. `build.sh` on Linux lays out `envgit-supervisor`
+  and `fc/` instead of the Swift helper and L1, builds the Node layer with the host's `mksquashfs`
+  (squashfs-tools), and makes its own prebuilt base. The egress proxy is srt's, so the host needs
+  what srt needs on Linux: bubblewrap, socat and ripgrep. x86_64 is not built yet (its Firecracker,
+  kernel, image and Node pins, and a machine to check them on).
+  Tested on a Mac with `scripts/vm/linux-test.sh`, which boots a Linux VM from L1's kernel (it has
+  KVM) with the same Ubuntu image and Node layer as root and this repo shared in, and runs the vm
+  e2e tests there against a Linux layout (`build.sh --linux-layout`); all pass, egress and
+  `envgit mcp` included (the script unpacks pinned noble bubblewrap, socat and ripgrep debs into
+  that VM). The numbers from it are still nested — that VM is an L1 — so they say nothing about
+  bare metal: `vm up` ≈ 1 s from the prebuilt base, `run true` ≈ 0.6 s, `rewind` ≈ 0.7 s, resume
+  ≈ 0.9 s. On a real host the expectation is Firecracker's own: L2 boot in ≈ 125 ms and no nested
+  fault costs.
 - **Not portable:** Firecracker snapshots do not load on a different CPU model, so a snapshot taken on
   a Mac will not restore on a Linux server even though the backend code is the same.
 - **Measured (M3 Pro):** new-session `vm up` ≈ 2 s from the prebuilt base (≈ 6 s with a cold boot: L2 boot ≈ 3.7 s + base snapshot + import); resuming
