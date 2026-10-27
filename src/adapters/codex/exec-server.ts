@@ -3,23 +3,20 @@
  * `codex exec-server` is marked experimental) sends every command and file operation to an
  * "exec-server" over JSON-RPC. envgit stands in as that server:
  *
- *   process/*   run by envgit's backend, in its sandbox and behind its gate; each process is a step
- *   fs mutators forwarded to a real `codex exec-server`, then recorded as one step per burst
+ *   process/*   run by envgit's backend (runners.ts: srt, or the vm guest), behind its gate; each process is a step
+ *   fs mutators forwarded to a real `codex exec-server` (on the host), then recorded as one step per burst
  *   the rest    (reads, metadata, config, discovery) forwarded unchanged
  *
  * Step boundaries follow the capture of a real `codex exec`: one non-PTY `process/start` per shell
  * tool call, apply_patch as `fs/writeFile`s. A step is recorded before Codex hears that it ended.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import os from 'node:os'
 import { relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SandboxManager } from '@anthropic-ai/sandbox-runtime'
-import type { Effect, Env } from '../../core/env/backend.js'
-import { SrtBackend, toEffect } from '../../core/env/srt.js'
+import type { Effect } from '../../core/env/backend.js'
 import { irreversibleOf, type Gate } from '../../core/policy/gate.js'
-import type { Policy } from '../../core/policy/schema.js'
-import { acquireBusy, ensureBase, openSession, recordStep, releaseBusy, type OpenSession, type Snapshotting } from '../../core/snapshot/log.js'
+import { acquireBusy, releaseBusy } from '../../core/snapshot/log.js'
+import type { FsOp, RunHandle, Runner, StepFields } from './runners.js'
 
 type Id = number | string
 interface Msg {
@@ -44,7 +41,7 @@ const FS_QUIET_MS = 150
 const MAX_BUFFERED = 8 << 20
 
 interface Proc {
-  child: ChildProcess
+  handle: RunHandle
   seq: number
   chunks: { seq: number; stream: 'stdout' | 'stderr'; chunk: string }[]
   buffered: number
@@ -58,12 +55,12 @@ interface Proc {
 
 export interface CodexExecServerOptions {
   workdir: string
-  policy: Policy
   gate: Gate
   /** Delivers one JSON-RPC message to Codex. */
   send: (text: string) => void
   root: string
-  snapshotting: Snapshotting
+  /** Called once, holding the busy lock. */
+  runner: () => Promise<Runner>
   codexBin?: string
   log?: (line: string) => void
 }
@@ -74,11 +71,8 @@ export class CodexExecServer {
   private pendingUp = new Map<number, (m: Msg) => void>()
   private queue: Promise<unknown> = Promise.resolve()
   private procs = new Map<string, Proc>()
-  private backend = new SrtBackend()
-  private env?: Env
-  private session?: OpenSession
-  private prependPath: string[] = []
-  private fsBurst?: { startedAt: string; ops: { op: 'write' | 'delete'; path: string }[]; timer?: NodeJS.Timeout }
+  private runner?: Runner
+  private fsBurst?: { startedAt: string; ops: FsOp[]; timer?: NodeJS.Timeout }
   private holds = 0
   private recording: Promise<unknown> = Promise.resolve()
   /** The first initialize's answer; a reconnecting Codex gets it again (the upstream is initialized once). */
@@ -106,14 +100,12 @@ export class CodexExecServer {
       for (const done of this.pendingUp.values()) done({ error: { code: -32603, message: 'envgit: codex exec-server exited' } })
       this.pendingUp.clear()
     })
-    this.session = await openSession(this.o.root, this.backend.name)
     await this.hold()
     try {
-      await ensureBase(this.session, this.o.snapshotting)
+      this.runner = await this.o.runner()
     } finally {
       await this.release()
     }
-    this.env = await this.backend.create({ workdir: this.o.workdir, policy: this.o.policy, snapshots: this.o.snapshotting, gate: this.o.gate })
   }
 
   /** One message from Codex. Requests are handled one at a time, as the real server does by default. */
@@ -130,8 +122,8 @@ export class CodexExecServer {
   }
 
   /** Steps are appended one at a time: commands may end together, or while an fs burst is recorded. */
-  private record(...args: Parameters<typeof recordStep>): Promise<unknown> {
-    const next = this.recording.then(() => recordStep(...args))
+  private record(step: StepFields): Promise<unknown> {
+    const next = this.recording.then(() => this.runner!.record(step))
     this.recording = next.catch(() => {})
     return next
   }
@@ -143,13 +135,13 @@ export class CodexExecServer {
   async close(): Promise<void> {
     if (this.closing) return
     this.closing = true
-    for (const p of this.procs.values()) if (!p.closed) p.child.kill('SIGTERM')
+    for (const p of this.procs.values()) if (!p.closed) p.handle.kill('SIGTERM')
     await this.queue
     await Promise.all([...this.procs.values()].map(p => this.whenClosed(p)))
     await this.flushFs()
     this.upstream?.stdin?.end()
     this.upstream?.kill()
-    if (this.env) await this.backend.destroy(this.env)
+    await this.runner?.close()
   }
 
   private reply(id: Id | undefined, result: unknown): void {
@@ -184,7 +176,7 @@ export class CodexExecServer {
       case 'process/terminate': {
         const p = this.procs.get(m.params?.processId)
         const running = !!p && p.exitCode === undefined
-        if (running) p.child.kill(m.method === 'process/signal' ? 'SIGINT' : 'SIGTERM')
+        if (running) p.handle.kill(m.method === 'process/signal' ? 'SIGINT' : 'SIGTERM')
         return this.reply(m.id, m.method === 'process/signal' ? {} : { running })
       }
     }
@@ -212,7 +204,7 @@ export class CodexExecServer {
     if (r.error) return this.fail(m.id, r.error.code, r.error.message)
     const info = r.result?.environmentInfo
     if (info?.capabilities) for (const c of UNSERVED_CAPABILITIES) info.capabilities[c] = false
-    this.prependPath = (info?.prependPathDirs ?? []).map((u: string) => fileURLToPath(u))
+    this.runner!.adjustInfo(info)
     this.initResult = r.result
     this.reply(m.id, r.result)
   }
@@ -223,63 +215,63 @@ export class CodexExecServer {
     const argv: string[] = p.argv ?? []
     if (!id || !argv.length) return this.fail(m.id, -32602, 'processId and a non-empty argv are required')
     if (this.procs.has(id)) return this.fail(m.id, -32600, `process ${id} already exists`)
-    if (!this.env) return this.fail(m.id, -32603, 'envgit: not started')
+    const runner = this.runner
+    if (!runner) return this.fail(m.id, -32603, 'envgit: not started')
     const startedAt = new Date().toISOString()
     const shell = await this.o.gate.checkShell(argv)
     await this.hold()
     const cwd = p.cwd ? fileURLToPath(p.cwd) : this.o.workdir
-    let child: ChildProcess, commandId: string
-    try {
-      ;({ child, commandId } = await this.backend.spawn(this.env, { argv: shell.refused ? ['/bin/sh', '-c', 'printf "%s\\n" "$1" >&2; exit 126', 'envgit', shell.refused] : argv, cwd, env: this.childEnv(p) }, ['ignore', 'pipe', 'pipe']))
-    } catch (e) {
-      await this.release()
-      return this.fail(m.id, -32603, `envgit: could not start ${argv[0]}: ${e instanceof Error ? e.message : e}`)
-    }
-    const proc: Proc = { child, seq: 0, chunks: [], buffered: 0, ended: false, closed: false, waiters: [] }
-    this.procs.set(id, proc)
-    this.reply(m.id, { processId: id, sandboxType: process.platform === 'darwin' ? 'macosSeatbelt' : 'linuxSeccomp' })
+    const proc: Proc = { handle: undefined as unknown as RunHandle, seq: 0, chunks: [], buffered: 0, ended: false, closed: false, waiters: [] }
     const wake = () => proc.waiters.splice(0).forEach(w => w())
-    const out = (stream: 'stdout' | 'stderr') => (d: Buffer) => {
+    const onOutput = (stream: 'stdout' | 'stderr', d: Buffer) => {
       const chunk = d.toString('base64')
       const seq = ++proc.seq
       if (proc.buffered < MAX_BUFFERED) (proc.chunks.push({ seq, stream, chunk }), (proc.buffered += d.length))
       this.notify('process/output', { processId: id, seq, stream, chunk })
       wake()
     }
-    child.stdout!.on('data', out('stdout'))
-    child.stderr!.on('data', out('stderr'))
-    child.on('error', e => (proc.failure = e.message))
-    child.on('close', (code, sig) => {
-      const exitCode = code ?? 128 + ((sig && (os.constants.signals as Record<string, number>)[sig]) || 0)
-      const effects: Effect[] = [
-        ...(shell.refused ? [{ kind: 'policy', denied: true, reason: shell.refused } as const] : []),
-        ...this.backend.gated(),
-        ...this.backend.violations(commandId).map(toEffect),
-      ]
-      proc.ended = true
-      // Process-wide in srt (Linux bwrap mount points), so only once no other command runs.
-      if ([...this.procs.values()].every(q => q.ended)) SandboxManager.cleanupAfterCommand()
-      const irreversible = shell.irreversible ?? irreversibleOf(effects)
-      // Recorded before Codex hears of the exit: its next request may already depend on this step.
-      void this.record(this.session!, this.o.snapshotting, {
-        startedAt,
-        endedAt: new Date().toISOString(),
-        action: { type: 'exec', input: JSON.stringify(argv) },
-        exitCode,
-        effects,
-        ...(irreversible && { irreversible: { reason: irreversible } }),
-        ...(p.metadata?.toolCallId && { codex: { toolCallId: String(p.metadata.toolCallId) } }),
+    try {
+      const run = shell.refused ? ['/bin/sh', '-c', 'printf "%s\\n" "$1" >&2; exit 126', 'envgit', shell.refused] : argv
+      proc.handle = await runner.run({ argv: run, cwd, params: p }, onOutput)
+    } catch (e) {
+      await this.release()
+      return this.fail(m.id, -32603, `envgit: could not start ${argv[0]}: ${e instanceof Error ? e.message : e}`)
+    }
+    this.procs.set(id, proc)
+    this.reply(m.id, { processId: id, sandboxType: runner.sandboxType })
+    void proc.handle.done
+      .then(
+        async ({ exitCode, effects: ran }) => {
+          proc.ended = true
+          const effects: Effect[] = [...(shell.refused ? [{ kind: 'policy', denied: true, reason: shell.refused } as const] : []), ...ran]
+          const irreversible = shell.irreversible ?? irreversibleOf(effects)
+          // Recorded before Codex hears of the exit: its next request may already depend on this step.
+          await this.record({
+            startedAt,
+            endedAt: new Date().toISOString(),
+            action: { type: 'exec', input: JSON.stringify(argv) },
+            exitCode,
+            effects,
+            ...(irreversible && { irreversible: { reason: irreversible } }),
+            ...(p.metadata?.toolCallId && { codex: { toolCallId: String(p.metadata.toolCallId) } }),
+          }).catch(e => this.o.log?.(`envgit: recording the step failed: ${e instanceof Error ? e.message : e}`))
+          return exitCode
+        },
+        e => {
+          proc.failure = e instanceof Error ? e.message : String(e)
+          onOutput('stderr', Buffer.from(`envgit: ${proc.failure}\n`))
+          return 127
+        },
+      )
+      .then(async exitCode => {
+        await this.release()
+        proc.ended = true
+        proc.exitCode = exitCode
+        this.notify('process/exited', { processId: id, seq: ++proc.seq, exitCode, sandboxDenied: false })
+        proc.closed = true
+        this.notify('process/closed', { processId: id, seq: ++proc.seq })
+        wake()
       })
-        .catch(e => this.o.log?.(`envgit codex: recording the step failed: ${e instanceof Error ? e.message : e}`))
-        .finally(async () => {
-          await this.release()
-          proc.exitCode = exitCode
-          this.notify('process/exited', { processId: id, seq: ++proc.seq, exitCode, sandboxDenied: false })
-          proc.closed = true
-          this.notify('process/closed', { processId: id, seq: ++proc.seq })
-          wake()
-        })
-    })
   }
 
   private async processRead(m: Msg): Promise<void> {
@@ -315,18 +307,6 @@ export class CodexExecServer {
     })
   }
 
-  /** As the real server builds it: the policy over envgit's own environment, then the explicit variables. */
-  private childEnv(p: any): Record<string, string> {
-    const pol = p.envPolicy ?? {}
-    let base: Record<string, string> = {}
-    if (pol.inherit !== 'none') for (const [k, v] of Object.entries(process.env)) if (v !== undefined) base[k] = v
-    for (const k of pol.exclude ?? []) delete base[k]
-    if (pol.includeOnly?.length) base = Object.fromEntries(Object.entries(base).filter(([k]) => pol.includeOnly.includes(k)))
-    const env = { ...base, ...(pol.set ?? {}), ...(p.env ?? {}) }
-    if (this.prependPath.length) env.PATH = [...this.prependPath, env.PATH ?? ''].filter(Boolean).join(':')
-    return env
-  }
-
   private async flushFs(): Promise<void> {
     const burst = this.fsBurst
     if (!burst) return
@@ -334,7 +314,8 @@ export class CodexExecServer {
     clearTimeout(burst.timer)
     try {
       if (!burst.ops.length) return
-      await this.record(this.session!, this.o.snapshotting, {
+      await this.runner!.applyFs(burst.ops)
+      await this.record({
         startedAt: burst.startedAt,
         endedAt: new Date().toISOString(),
         action: { type: 'fs', input: JSON.stringify(burst.ops) },

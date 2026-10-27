@@ -3,6 +3,7 @@ import { access, copyFile, cp, mkdir, readFile, rename, rm, writeFile } from 'no
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runCodexWs, serveCodexStdio } from '../adapters/codex/serve.js'
+import { SrtRunner, VmRunner, type Runner } from '../adapters/codex/runners.js'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
@@ -46,7 +47,7 @@ const help = `envgit — version control for agent execution environments
   envgit mcp [--tools]   serve the sandboxed REPL as an MCP server on stdio
                          (--tools: one MCP tool per capability instead of execute)
   envgit codex [args...] run Codex with envgit as its environment: each command it runs
-                         is a step in the sandbox, each apply_patch a step (srt backend)
+                         is a step in the sandbox (srt or vm), each apply_patch a step
   envgit codex-exec-server   the same, as a stdio exec-server for ~/.codex/environments.toml
   envgit log                     show the steps leading to the current state
   envgit rewind <step|base>      restore the workdir to a step (--force drops unrecorded edits)
@@ -188,11 +189,20 @@ async function mcp(mode: 'repl' | 'tools'): Promise<number> {
 /** Codex's commands and file operations, through envgit (src/adapters/codex). */
 async function codexOptions() {
   const policy = await requireInit()
-  if (policy.backend === 'vm') throw new Error('envgit codex: the vm backend is not supported yet; use backend: srt')
   // Codex owns the terminal, and the exec-server protocol has no way to ask its user.
   const gate = new Gate(policy, undefined, 'no way to ask from inside Codex')
   const log = (line: string) => console.error(line)
-  return { workdir: process.cwd(), policy, gate, root: ROOT, snapshotting: snapshotting(policy), codexBin: process.env.ENVGIT_CODEX_BIN, log }
+  const workdir = process.cwd()
+  const common = { workdir, policy, gate, snapshotting: snapshotting(policy), log }
+  // On vm the VM must be up (and on the current build) before Codex starts.
+  const vmSess = policy.backend === 'vm' ? await vmSession(policy) : undefined
+  const runner = async (): Promise<Runner> => {
+    if (!vmSess) return SrtRunner.create(common, await openSession(ROOT, 'srt'))
+    const vm = new VmBackend()
+    await vm.create({ workdir })
+    return new VmRunner(common, vmSess, vm)
+  }
+  return { workdir, gate, root: ROOT, runner, codexBin: process.env.ENVGIT_CODEX_BIN, log }
 }
 
 async function codex(argv: string[]): Promise<number> {
