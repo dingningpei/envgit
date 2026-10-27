@@ -9,7 +9,8 @@ import { serveMcp } from '../adapters/mcp/server.js'
 import { serveUi } from '../ui/server.js'
 import { runHook, type HookEvent } from '../adapters/hooks/handler.js'
 import { COPILOT_WRITERS, type Agent } from '../adapters/hooks/normalize.js'
-import { compileClaudeSandbox } from '../core/policy/compile.js'
+import { runClaude } from '../adapters/hooks/claude-run.js'
+import { relay, SPOOL_ENV } from '../adapters/hooks/spool.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
 import { recordVmStep, reportMirror, withEgress } from '../core/env/vm-step.js'
@@ -56,8 +57,9 @@ const help = `envgit — version control for agent execution environments
   envgit codex [args...] run Codex with envgit as its environment: each command it runs
                          is a step in the sandbox (srt or vm), each apply_patch a step
   envgit codex-exec-server   the same, as a stdio exec-server for ~/.codex/environments.toml
-  envgit claude [args...]  run Claude Code with envgit's hooks: each tool call that can change
-                         files is a step, irreversible commands are refused or asked (srt)
+  envgit claude [args...]  run Claude Code inside envgit's sandbox and gate: each tool call that
+                         can change files is a step, every request it makes is judged (srt;
+                         needs CLAUDE_CODE_OAUTH_TOKEN from \`claude setup-token\`, or ANTHROPIC_API_KEY)
   envgit hooks install|uninstall copilot   the same hooks for Copilot CLI (.github/hooks/envgit.json)
   envgit log                     show the steps leading to the current state
   envgit ui [--port N] [--open]  the session timeline in a browser: steps, effects, diffs,
@@ -254,6 +256,14 @@ async function hook(argv: string[]): Promise<number> {
   if (!['claude-code', 'copilot'].includes(agent) || !['pre', 'post', 'post-failed', 'stop'].includes(event)) throw new Error('usage: envgit hook <claude-code|copilot> <pre|post|post-failed|stop>')
   let input = ''
   for await (const chunk of process.stdin) input += chunk
+  // Inside `envgit claude`'s sandbox: hand the event to the envgit outside it (it cannot write .envgit).
+  const spool = process.env[SPOOL_ENV]
+  if (spool) {
+    const out = await relay(spool, { agent, event, input }, 280_000).catch(e => (console.error(`envgit: hook relay failed: ${e instanceof Error ? e.message : e}`), undefined))
+    if (out === undefined) console.error(`envgit: no answer from envgit for the ${event} hook; going on without it`)
+    else if (out) process.stdout.write(out + '\n')
+    return 0
+  }
   // Installed hooks also fire in directories envgit does not manage: then they do nothing.
   if (!(await exists(POLICY))) return 0
   try {
@@ -273,29 +283,22 @@ async function hook(argv: string[]): Promise<number> {
 
 async function claude(argv: string[]): Promise<number> {
   const policy = await requireInit()
-  if (policy.backend === 'vm') throw new Error('envgit claude: Claude Code runs its tools on the host, so it needs backend: srt (use `envgit mcp` to work inside the VM)')
-  const writers = 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit'
-  const settings = {
-    hooks: {
-      PreToolUse: [{ matcher: writers, hooks: [{ type: 'command', command: hookCommand('claude-code', 'pre'), timeout: 60 }] }],
-      PostToolUse: [{ matcher: writers, hooks: [{ type: 'command', command: hookCommand('claude-code', 'post'), timeout: 300 }] }],
-      Stop: [{ hooks: [{ type: 'command', command: hookCommand('claude-code', 'stop'), timeout: 300 }] }],
-    },
-    sandbox: compileClaudeSandbox(policy, process.cwd()),
-  }
+  if (policy.backend === 'vm') throw new Error('envgit claude: Claude Code runs on the host, inside srt, so it needs backend: srt (use `envgit mcp` to work inside the VM)')
   // ENVGIT_CLAUDE_AGENT (a JSON argv) stands in for the claude binary, for tests.
   const agent = process.env.ENVGIT_CLAUDE_AGENT ? (JSON.parse(process.env.ENVGIT_CLAUDE_AGENT) as string[]) : ['claude']
-  const ignore = () => {}
-  process.on('SIGINT', ignore)
-  try {
-    const child = spawn(agent[0]!, [...agent.slice(1), '--settings', JSON.stringify(settings), ...argv], { stdio: 'inherit' })
-    const code = await new Promise<number>((resolve, reject) => (child.on('error', reject), child.on('exit', (c, sig) => resolve(c ?? (sig ? 130 : 1)))))
-    const session = await openSession(ROOT, 'srt')
-    console.error(`envgit: Claude Code ran in session ${session.meta.id}; \`envgit log\` shows its steps`)
-    return code
-  } finally {
-    process.off('SIGINT', ignore)
-  }
+  const code = await runClaude({
+    root: ROOT,
+    workdir: process.cwd(),
+    policy,
+    snapshotting: snapshotting(policy),
+    agent,
+    args: argv,
+    hookCommand: event => hookCommand('claude-code', event as HookEvent),
+    log: line => console.error(line),
+  })
+  const session = await openSession(ROOT, 'srt')
+  console.error(`envgit: Claude Code ran in session ${session.meta.id}; \`envgit log\` shows its steps`)
+  return code
 }
 
 const COPILOT_HOOKS = join(process.cwd(), '.github', 'hooks', 'envgit.json')

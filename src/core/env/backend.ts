@@ -2,6 +2,7 @@
 import type { Policy } from '../policy/schema.js'
 import type { SnapshotStore } from '../snapshot/store.js'
 import type { Gate } from '../policy/gate.js'
+import type { SrtExtra } from '../policy/compile.js'
 
 export type SnapshotId = string & { readonly __brand: 'SnapshotId' }
 
@@ -13,6 +14,8 @@ export interface EnvSpec {
   snapshots?: { store: SnapshotStore; exclude: string[] }
   /** Judges each HTTP request (and asks a person when a rule says so). */
   gate?: Gate
+  /** srt only: sandbox settings this run needs beyond the policy (see compileSrt). */
+  srtExtra?: SrtExtra
 }
 
 export interface Env {

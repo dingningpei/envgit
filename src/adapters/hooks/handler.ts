@@ -8,7 +8,7 @@
  */
 import { relative, isAbsolute } from 'node:path'
 import type { Effect, SnapshotId } from '../../core/env/backend.js'
-import { judgeShell } from '../../core/policy/gate.js'
+import { irreversibleOf, judgeShell } from '../../core/policy/gate.js'
 import type { Policy } from '../../core/policy/schema.js'
 import { acquireBusy, ensureBase, openSession, readHead, recordStep, releaseBusy, snapshotOf, type Snapshotting, type Step } from '../../core/snapshot/log.js'
 import { changesFiles, normalize, type Agent, type ToolEvent } from './normalize.js'
@@ -20,6 +20,11 @@ export interface HookContext {
   workdir: string
   policy: Policy
   snapshotting: Snapshotting
+  /**
+   * When the agent itself runs in envgit's sandbox (`envgit claude`): the requests the gate judged
+   * and the sandbox denials since the last step, which go on the step being recorded.
+   */
+  sandboxEffects?: () => Effect[]
 }
 
 /** Per kind, as on vm: a `npm install` must not put tens of thousands of paths in the log. */
@@ -80,8 +85,11 @@ async function capture(ctx: HookContext) {
 }
 
 async function post(ev: ToolEvent, failed: boolean, ctx: HookContext): Promise<void> {
-  const { session, id, effects } = await capture(ctx)
+  const { session, id, effects: files } = await capture(ctx)
+  const net = ctx.sandboxEffects?.() ?? []
+  const effects = [...files, ...net]
   const hit = ev.command ? judgeShell(ctx.policy, ['sh', '-c', ev.command]) : undefined
+  const wentOut = irreversibleOf(net)
   const rel = (p: string) => (isAbsolute(p) ? relative(ctx.workdir, p) : p)
   const action: Step['action'] = ev.command
     ? { type: 'exec', input: JSON.stringify([ev.command]) }
@@ -93,21 +101,27 @@ async function post(ev: ToolEvent, failed: boolean, ctx: HookContext): Promise<v
     exitCode: failed ? 1 : 0,
     effects,
     // It ran: under `ask` someone approved it in the agent; under `allow` the policy marks it.
-    ...(hit && { irreversible: { reason: `${hit.rule} (${ev.command}, ${hit.action === 'ask' ? `approved in ${ev.agent}` : 'allowed'})` } }),
+    ...(hit
+      ? { irreversible: { reason: `${hit.rule} (${ev.command}, ${hit.action === 'ask' ? `approved in ${ev.agent}` : 'allowed'})` } }
+      : wentOut && { irreversible: { reason: wentOut } }),
     agent: { name: ev.agent, tool: ev.tool, ...(ev.toolUseId && { toolUseId: ev.toolUseId }) },
   })
 }
 
 /** At the end of a turn: what changed outside tool calls (background processes), if anything. */
 async function checkpoint(ev: ToolEvent, ctx: HookContext): Promise<void> {
-  const { session, id, prevId, effects } = await capture(ctx)
-  if (id === prevId || !effects.length) return
+  const { session, id, prevId, effects: files } = await capture(ctx)
+  const net = ctx.sandboxEffects?.() ?? []
+  const effects = [...files, ...net]
+  if ((id === prevId || !files.length) && !net.length) return
+  const wentOut = irreversibleOf(net)
   await recordStep(session, { ...ctx.snapshotting, take: async () => id as SnapshotId }, {
     startedAt: new Date().toISOString(),
     endedAt: new Date().toISOString(),
     action: { type: 'checkpoint', input: `end of a ${ev.agent} turn: changes made outside its tool calls` },
     exitCode: 0,
     effects,
+    ...(wentOut && { irreversible: { reason: wentOut } }),
     agent: { name: ev.agent, tool: 'Stop' },
   })
 }

@@ -115,34 +115,4 @@ describe('agent hooks (e2e, needs `npm run build`)', () => {
     const r = await hook(other, 'claude-code', 'pre', { tool_name: 'Bash', tool_input: { command: 'git push' } })
     expect(r).toEqual({ code: 0, stdout: '', stderr: '' })
   })
-
-  it('runs Claude Code with the hooks and a sandbox compiled from the policy', async () => {
-    const d = await realpath(await mkdtemp(join(tmpdir(), 'envgit-claude-')))
-    await mkdir(join(d, '.envgit', 'sessions'), { recursive: true })
-    await writeFile(join(d, '.envgit', 'policy.yaml'), POLICY)
-    // Stands in for claude: reads --settings, runs its hooks around one Bash call, prints the sandbox.
-    await writeFile(
-      join(d, 'agent.mjs'),
-      `import { execSync } from 'node:child_process'
-const settings = JSON.parse(process.argv[process.argv.indexOf('--settings') + 1])
-const fire = (event, payload) => execSync(settings.hooks[event][0].hooks[0].command, { input: JSON.stringify(payload) }).toString()
-const call = { tool_name: 'Bash', tool_input: { command: 'echo hi > out.txt' }, tool_use_id: 'c1' }
-if (fire('PreToolUse', call)) process.exit(3)
-execSync('echo hi > out.txt')
-fire('PostToolUse', call)
-fire('Stop', {})
-console.log(JSON.stringify({ sandbox: settings.sandbox, rest: process.argv.slice(process.argv.indexOf('--settings') + 2) }))
-`,
-    )
-    const r = await run(process.execPath, [CLI, 'claude', '-p', 'hello'], { cwd: d, env: { ...process.env, ENVGIT_CLAUDE_AGENT: JSON.stringify([process.execPath, join(d, 'agent.mjs')]) } })
-    const out = JSON.parse(r.stdout)
-    expect(out.rest).toEqual(['-p', 'hello'])
-    expect(out.sandbox).toEqual({
-      enabled: true,
-      filesystem: { allowRead: [], denyRead: [], allowWrite: [d], denyWrite: [join(d, '.envgit')] },
-      network: { allowedDomains: ['api.github.com'], deniedDomains: [] },
-    })
-    const log = (await run(process.execPath, [CLI, 'log'], { cwd: d })).stdout
-    expect(log).toMatch(/exec {2}exit 0 .*echo hi > out\.txt/)
-  }, 30_000)
 })

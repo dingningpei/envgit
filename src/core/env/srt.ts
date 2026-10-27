@@ -24,7 +24,7 @@ export class SrtBackend implements EnvBackend {
       throw new Error(`srt: sandboxing is not supported on ${process.platform}`)
     }
     this.gate = spec.gate
-    await SandboxManager.initialize(compileSrt(spec.policy ?? {}, spec.gate), undefined, true)
+    await SandboxManager.initialize(compileSrt(spec.policy ?? {}, spec.gate, { extra: spec.srtExtra }), undefined, true)
     if (!SandboxManager.isSandboxingEnabled()) throw new Error('srt: sandbox failed to initialize')
     this.env = { id: randomUUID(), backend: this.name, workdir: spec.workdir, snapshots: spec.snapshots }
     return this.env
