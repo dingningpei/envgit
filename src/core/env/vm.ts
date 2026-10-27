@@ -1,7 +1,7 @@
 /** VM backend: nested Firecracker inside a Virtualization-framework microVM. See docs/design.md §3.6 */
 import { execFile, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { access, chmod, constants, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { access, chmod, constants, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -220,19 +220,135 @@ export async function vmSnapshotClosure(snaps: string, ids: Iterable<string>): P
 /** Deletes VM snapshots nothing live builds on, plus temp dirs an interrupted write left. */
 export async function gcVmSnapshots(workdir: string, live: Set<string>): Promise<{ snapshots: number; bytes: number }> {
   const snaps = vmPaths(workdir).snaps
+  await recoverVmFolds(workdir)
   const keep = await vmSnapshotClosure(snaps, live)
   let snapshots = 0
   let bytes = 0
   for (const name of await readdir(snaps).catch(() => [] as string[])) {
     if (keep.has(name)) continue
-    // A snapshot that is still being written has no meta.json yet; leave fresh ones alone.
+    // A snapshot that is still being written has no meta.json yet; leave fresh ones alone. Complete
+    // ones are written under the busy lock, so only that lock's holder could be about to use one.
     const st = await stat(join(snaps, name)).catch(() => undefined)
-    if (!st || Date.now() - st.ctimeMs < 60 * 60_000) continue
+    if (!st || (Date.now() - st.ctimeMs < 60 * 60_000 && (name.startsWith('.') || !(await readSnapMeta(snaps, name))))) continue
     for (const f of await readdir(join(snaps, name)).catch(() => [] as string[])) bytes += (await stat(join(snaps, name, f)).catch(() => ({ size: 0 }))).size
     await rm(join(snaps, name), { recursive: true, force: true })
     if (!name.startsWith('.tmp-')) snapshots++
   }
   return { snapshots, bytes }
+}
+
+/** Finishes or undoes a fold a crash interrupted (see foldVmDiff): the old child comes back if the new one is not in place. */
+export async function recoverVmFolds(workdir: string): Promise<void> {
+  const snaps = vmPaths(workdir).snaps
+  for (const name of await readdir(snaps).catch(() => [] as string[])) {
+    if (!name.startsWith('.old-')) continue
+    const id = name.slice('.old-'.length)
+    if (await readSnapMeta(snaps, id)) await rm(join(snaps, name), { recursive: true, force: true })
+    else await rename(join(snaps, name), join(snaps, id))
+  }
+}
+
+/** Bytes the workdir's VM snapshots take. */
+export async function vmSnapshotBytes(workdir: string): Promise<number> {
+  const snaps = vmPaths(workdir).snaps
+  let bytes = 0
+  for (const name of await readdir(snaps).catch(() => [] as string[]))
+    for (const f of await readdir(join(snaps, name)).catch(() => [] as string[])) bytes += (await lstat(join(snaps, name, f)).catch(() => ({ size: 0 }))).size
+  return bytes
+}
+
+/**
+ * Folds diff snapshot `parent` into its child, so the child no longer builds on it: the child's memory
+ * becomes parent's pages overlaid with its own (what rebase-snap does at restore), its meta points at
+ * parent's parent, and its machine state is untouched. Once every child is folded, parent can go.
+ * The packed format (see vm/guest/cmd/l1: mem.idx = file size, then sorted (offset, length) extents;
+ * mem.dat = their bytes in order) makes this a merge of two sorted extent lists.
+ */
+export async function foldVmDiff(workdir: string, parent: string, child: string): Promise<void> {
+  const snaps = vmPaths(workdir).snaps
+  await recoverVmFolds(workdir)
+  const pm = await readSnapMeta(snaps, parent)
+  const cm = await readSnapMeta(snaps, child)
+  if (!pm || !cm || cm.parent !== parent) throw new Error(`vm: ${child} is not a child of ${parent}`)
+  if (pm.kind === 'Full') throw new Error(`vm: ${parent} is a full snapshot; only diffs fold into their children`)
+  const extents = async (id: string) => {
+    const idx = await readFile(join(snaps, id, 'mem.idx'))
+    if (idx.length < 8 || (idx.length - 8) % 16) throw new Error(`vm: snapshot ${id}: corrupt mem.idx`)
+    const out: { off: number; len: number; at: number }[] = []
+    let at = 0
+    for (let p = 8; p < idx.length; p += 16) {
+      const e = { off: Number(idx.readBigUInt64LE(p)), len: Number(idx.readBigUInt64LE(p + 8)), at }
+      out.push(e)
+      at += e.len
+    }
+    return { size: Number(idx.readBigUInt64LE(0)), list: out }
+  }
+  const P = await extents(parent)
+  const C = await extents(child)
+  // Pieces of the merged file in offset order: all of the child's extents, and the parts of the
+  // parent's that the child does not cover.
+  const pieces: { off: number; len: number; src: 'p' | 'c'; at: number }[] = C.list.map(e => ({ ...e, src: 'c' as const }))
+  let ci = 0
+  for (const e of P.list) {
+    let off = e.off
+    const end = e.off + e.len
+    while (off < end) {
+      while (ci < C.list.length && C.list[ci]!.off + C.list[ci]!.len <= off) ci++
+      const c = C.list[ci]
+      if (!c || c.off >= end) {
+        pieces.push({ off, len: end - off, src: 'p', at: e.at + (off - e.off) })
+        break
+      }
+      if (c.off > off) pieces.push({ off, len: c.off - off, src: 'p', at: e.at + (off - e.off) })
+      off = Math.max(off, c.off + c.len)
+    }
+  }
+  pieces.sort((a, b) => a.off - b.off)
+  const tmp = join(snaps, `.tmp-fold-${child}`)
+  await rm(tmp, { recursive: true, force: true })
+  await mkdir(tmp, { recursive: true })
+  const pd = await open(join(snaps, parent, 'mem.dat'), 'r')
+  const cd = await open(join(snaps, child, 'mem.dat'), 'r')
+  const out = await open(join(tmp, 'mem.dat'), 'w')
+  const idx: Buffer[] = [Buffer.alloc(8)]
+  idx[0]!.writeBigUInt64LE(BigInt(Math.max(P.size, C.size)))
+  try {
+    const buf = Buffer.alloc(1 << 20)
+    let runStart = -1
+    let runEnd = -1
+    const flush = () => {
+      if (runStart < 0) return
+      const e = Buffer.alloc(16)
+      e.writeBigUInt64LE(BigInt(runStart), 0)
+      e.writeBigUInt64LE(BigInt(runEnd - runStart), 8)
+      idx.push(e)
+    }
+    for (const piece of pieces) {
+      if (piece.off !== runEnd) (flush(), (runStart = piece.off))
+      runEnd = piece.off + piece.len
+      const src = piece.src === 'p' ? pd : cd
+      for (let done = 0; done < piece.len; ) {
+        const n = Math.min(buf.length, piece.len - done)
+        const { bytesRead } = await src.read(buf, 0, n, piece.at + done)
+        if (bytesRead !== n) throw new Error(`vm: short read folding ${parent} into ${child}`)
+        await out.write(buf, 0, n)
+        done += n
+      }
+    }
+    flush()
+    await out.sync()
+  } finally {
+    await Promise.all([pd.close(), cd.close(), out.close()])
+  }
+  await writeFile(join(tmp, 'mem.idx'), Buffer.concat(idx))
+  await copyFile(join(snaps, child, 'state'), join(tmp, 'state'))
+  await writeFile(join(tmp, 'meta.json'), JSON.stringify({ ...cm, parent: pm.parent }))
+  // Swap the folded copy in. A crash in between leaves `.old-<child>`, which recoverVmFolds puts back.
+  const old = join(snaps, `.old-${child}`)
+  await rm(old, { recursive: true, force: true })
+  await rename(join(snaps, child), old)
+  await rename(tmp, join(snaps, child))
+  await rm(old, { recursive: true, force: true })
 }
 
 /** Clones (APFS copy-on-write where possible) `id` and its whole chain into another workdir. */
@@ -255,7 +371,7 @@ export async function copyVmSnapshots(fromWorkdir: string, toWorkdir: string, id
 // random numbers: Firecracker gives every restored guest a new VMGenID and the kernel reseeds on it.
 
 /** What build.sh runs in the guest before taking the prebuilt base. */
-export const WARM_ARGV = ['sh', '-c', 'node -e 1 && npm -v && python3 -c 1 && git --version']
+export const WARM_ARGV = ['sh', '-c', 'node -e 1 && npm -v && python3 -c 1 && git --version && rg --version']
 
 /** Clones the prebuilt base into the workdir's snapshots if it belongs to this build; its id, or undefined. */
 async function usePrebuiltBase(workdir: string): Promise<SnapshotId | undefined> {

@@ -19,6 +19,8 @@ export interface Step {
   irreversible?: { reason: string }
   /** The Codex tool call that ran this step, when it came through `envgit codex`. */
   codex?: { toolCallId: string }
+  /** The agent tool call that made this step, when it came through hooks (`envgit claude`, Copilot). */
+  agent?: { name: string; tool: string; toolUseId?: string }
   snapshot?: SnapshotId
   parent?: number
 }
@@ -66,8 +68,11 @@ export async function liveSnapshots(root: string): Promise<Set<SnapshotId>> {
   for (const id of ids) {
     const dir = join(root, 'sessions', id)
     const meta = await readFile(join(dir, 'session.json'), 'utf8').then(t => JSON.parse(t) as SessionMeta, () => undefined)
-    if (meta?.base) live.add(meta.base)
-    for (const step of await readSteps(dir)) if (step.snapshot) live.add(step.snapshot)
+    // A pruned step keeps its log entry, not its snapshot (snapshot.maxBytes; srt ids are content
+    // hashes, so another step may still hold the same one).
+    const pruned = await readPruned(dir)
+    if (meta?.base && !pruned.has('base')) live.add(meta.base)
+    for (const step of await readSteps(dir)) if (step.snapshot && !pruned.has(step.index)) live.add(step.snapshot)
   }
   return live
 }
@@ -124,7 +129,21 @@ export function activeChain(steps: Step[], head: StepRef): Step[] {
   return chain
 }
 
+/** Steps (and possibly `base`) whose snapshots were dropped to keep under snapshot.maxBytes. */
+export async function readPruned(sessionDir: string): Promise<Set<StepRef>> {
+  const text = await readFile(join(sessionDir, 'pruned'), 'utf8').catch(() => '[]')
+  return new Set(JSON.parse(text) as StepRef[])
+}
+
+export async function addPruned(sessionDir: string, refs: StepRef[]): Promise<void> {
+  const all = await readPruned(sessionDir)
+  for (const r of refs) all.add(r)
+  await writeFile(join(sessionDir, 'pruned'), JSON.stringify([...all]) + '\n')
+}
+
+/** The snapshot a step (or base) can be restored from; undefined when it has none or it was pruned. */
 export async function snapshotOf(session: OpenSession, ref: StepRef): Promise<SnapshotId | undefined> {
+  if ((await readPruned(session.dir)).has(ref)) return undefined
   if (ref === 'base') return session.meta.base
   return (await readSteps(session.dir))[ref]?.snapshot
 }
@@ -135,6 +154,8 @@ export interface Snapshotting {
   exclude: string[]
   /** Backends with native snapshots (vm) take them here instead of the fs-level store. */
   take?: () => Promise<SnapshotId>
+  /** Keeps snapshots under the policy's snapshot.maxBytes; runs after each recorded step (cap.ts). */
+  cap?: () => Promise<void>
 }
 
 /** Takes the base snapshot if the session has none yet. Call before running the first step. */
@@ -163,5 +184,6 @@ export async function recordStep(
   const step: Step = { ...partial, index: steps.length, ...(head !== 'base' && { parent: head }), snapshot }
   await appendStep(session.dir, step)
   await writeHead(session.dir, step.index)
+  await snap.cap?.().catch(e => console.error(`envgit: keeping snapshots under snapshot.maxBytes failed: ${e instanceof Error ? e.message : e}`))
   return step
 }

@@ -1,7 +1,7 @@
 /** Where the Codex adapter's commands run and how its steps are recorded: srt on the host, or the vm guest. */
 import { basename, relative } from 'node:path'
 import os from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime'
 import type { Effect, Env } from '../../core/env/backend.js'
 import { SrtBackend, toEffect } from '../../core/env/srt.js'
@@ -20,11 +20,13 @@ export type FsOp = { op: 'write' | 'delete'; path: string }
 export interface CommandSpec {
   argv: string[]
   cwd: string
-  params: { envPolicy?: { inherit?: string; exclude?: string[]; set?: Record<string, string>; includeOnly?: string[] }; env?: Record<string, string> }
+  params: { tty?: boolean; pipeStdin?: boolean; envPolicy?: { inherit?: string; exclude?: string[]; set?: Record<string, string>; includeOnly?: string[] }; env?: Record<string, string> }
 }
 
 export interface RunHandle {
   kill(signal: NodeJS.Signals): void
+  /** Bytes for the command's stdin; false when it has none (not asked for, closed, or the runner cannot). */
+  write(data: Buffer): boolean
   done: Promise<{ exitCode: number; effects: Effect[] }>
 }
 
@@ -34,6 +36,8 @@ export interface Runner {
   /** Makes the real exec-server's environment info describe where commands actually run. */
   adjustInfo(info: any): void
   run(cmd: CommandSpec, onOutput: (stream: 'stdout' | 'stderr', data: Buffer) => void): Promise<RunHandle>
+  /** Rewrites a forwarded request's paths from where commands run to the host, where fs calls run. */
+  mapParams?(params: unknown): unknown
   /** Brings file operations Codex made on the host into the environment (before they are recorded). */
   applyFs(ops: FsOp[]): Promise<void>
   record(step: StepFields): Promise<void>
@@ -74,7 +78,11 @@ export class SrtRunner implements Runner {
   }
 
   async run(cmd: CommandSpec, onOutput: (stream: 'stdout' | 'stderr', data: Buffer) => void): Promise<RunHandle> {
-    const { child, commandId } = await this.backend.spawn(this.env, { argv: cmd.argv, cwd: cmd.cwd, env: this.childEnv(cmd.params) }, ['ignore', 'pipe', 'pipe'])
+    // No PTY (that needs a native module): a `tty` command gets a stdin pipe instead, so Codex's
+    // write_stdin reaches it, though the program does not see a terminal.
+    const interactive = Boolean(cmd.params.tty || cmd.params.pipeStdin)
+    const { child, commandId } = await this.backend.spawn(this.env, { argv: cmd.argv, cwd: cmd.cwd, env: this.childEnv(cmd.params) }, [interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'])
+    child.stdin?.on('error', () => {})
     this.running++
     child.stdout!.on('data', (d: Buffer) => onOutput('stdout', d))
     child.stderr!.on('data', (d: Buffer) => onOutput('stderr', d))
@@ -87,7 +95,16 @@ export class SrtRunner implements Runner {
         resolve({ exitCode: code ?? 128 + ((sig && (os.constants.signals as Record<string, number>)[sig]) || 0), effects })
       })
     })
-    return { kill: sig => child.kill(sig), done }
+    const write = (data: Buffer): boolean => {
+      const stdin = child.stdin
+      if (!stdin || stdin.destroyed || stdin.writableEnded) return false
+      // On a terminal these are keys, not bytes: ^C interrupts and ^D ends the input.
+      if (cmd.params.tty && data.length === 1 && data[0] === 0x03) return child.kill('SIGINT'), true
+      if (cmd.params.tty && data.length === 1 && data[0] === 0x04) return stdin.end(), true
+      stdin.write(data)
+      return true
+    }
+    return { kill: sig => child.kill(sig), write, done }
   }
 
   /** As the real server builds it: the policy over envgit's own environment, then the explicit variables. */
@@ -153,8 +170,17 @@ export class VmRunner implements Runner {
       return { exitCode: result.exitCode, effects: [...result.effects, ...effects] }
     })
     this.chain = done.catch(() => {})
-    // A running guest command cannot be interrupted from here yet.
-    return { kill: () => this.o.log?.('envgit: a command in the VM cannot be interrupted; it runs to its end (10 min limit)'), done }
+    // L2's exec has no stdin, and a running guest command cannot be interrupted from here yet.
+    return { kill: () => this.o.log?.('envgit: a command in the VM cannot be interrupted; it runs to its end (10 min limit)'), write: () => false, done }
+  }
+
+  /**
+   * Codex sees `/work` in command output (`pwd`) and may then name files there; fs calls run on the
+   * host, against the mirror, so `file:///work/…` becomes the host workdir.
+   */
+  mapParams(params: unknown): unknown {
+    const host = pathToFileURL(this.o.workdir).href
+    return JSON.parse(JSON.stringify(params ?? null).replace(/"file:\/\/\/work(?=[/"])/g, `"${host}`))
   }
 
   private guestPath(hostPath: string): string {

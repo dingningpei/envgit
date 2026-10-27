@@ -10,7 +10,7 @@
 #   build/fc/               firecracker, rebase-snap, L2 kernel (vmlinux) and initrd
 # Both:
 #   build/rootfs.squashfs   L2's root: Ubuntu 24.04 server cloud image (git, python3, curl, ...)
-#   build/layer.squashfs    Node, overlaid on the root under /usr/local
+#   build/layer.squashfs    Node and ripgrep (agents such as Codex search with rg), overlaid on the root under /usr/local
 #   build/image-stamp       hash of the two images; a session only resumes on the image it began on
 #   build/stamp             hash of everything above; a VM started from another build is restarted
 #   build/base/             prebuilt full snapshot of a warmed-up guest; new sessions restore it
@@ -37,6 +37,7 @@ esac
 LINUX_LAYOUT=""
 [ "${1:-}" = "--linux-layout" ] && LINUX_LAYOUT="${2:?--linux-layout needs a directory}"
 NODE_TAR=node-v24.21.0-linux-arm64.tar.xz
+RG_DEB=ripgrep_14.1.0-1_arm64.deb
 sha() { if command -v shasum >/dev/null; then shasum -a 256; else sha256sum; fi; }
 stamp() { (cd "$1" && shift && cat "$@" | sha | cut -c1-16); }
 clone() { if [ "$OS" = Darwin ]; then cp -c "$1" "$2"; else cp --reflink=auto "$1" "$2"; fi; }
@@ -100,7 +101,9 @@ fi
 echo "L2 images"
 # Attached as disks rather than packed into the initrd, so they are read on demand, not loaded into RAM.
 clone "$DL/ubuntu-24.04-server-cloudimg-arm64-20260926.squashfs" "$OUT/rootfs.squashfs.part" && mv "$OUT/rootfs.squashfs.part" "$OUT/rootfs.squashfs"
-LAYER_KEY=$( (cat "$OUT/rootfs.squashfs" "$DL/$NODE_TAR"; echo layer-v1) | sha | cut -c1-16)
+LAYER_KEY=$( (cat "$OUT/rootfs.squashfs" "$DL/$NODE_TAR" "$DL/$RG_DEB"; echo layer-v2) | sha | cut -c1-16)
+# rg from the pinned noble deb (the guest is noble too); bsdtar and GNU tar both read its data.tar.zst.
+rm -rf "$WORK/rg" && mkdir -p "$WORK/rg" && (cd "$WORK/rg" && ar x "$DL/$RG_DEB" && tar -xf data.tar.* ./usr/bin/rg)
 if [ "$(cat "$WORK/layer.key" 2>/dev/null)" = "$LAYER_KEY" ] && [ -s "$OUT/layer.squashfs" ]; then
   echo "ok       layer.squashfs"
 elif [ "$OS" = Linux ]; then
@@ -109,6 +112,7 @@ elif [ "$OS" = Linux ]; then
   S="$WORK/layer-src" && rm -rf "$S" && mkdir -p "$S/usr/local"
   tar -xJf "$DL/$NODE_TAR" -C "$S/usr/local" --strip-components 1
   rm -f "$S/usr/local/CHANGELOG.md" "$S/usr/local/README.md"
+  install -m 755 "$WORK/rg/usr/bin/rg" "$S/usr/local/bin/rg"
   mksquashfs "$S" "$OUT/layer.squashfs" -comp gzip -all-root -noappend -quiet
   rm -rf "$S"
   echo "$LAYER_KEY" > "$WORK/layer.key"
@@ -120,12 +124,14 @@ else
   stamp "$OUT" envgit-vm Image l1-initrd.cpio > "$OUT/stamp"
   BOOT="$WORK/layer-build" && rm -rf "$BOOT" && mkdir -p "$BOOT"
   cp "$DL/$NODE_TAR" "$BOOT/node.tar.xz"
+  cp "$WORK/rg/usr/bin/rg" "$BOOT/rg"
   envgit() { (cd "$BOOT" && node "$REPO/dist/cli/index.js" "$@"); }
   (cd "$REPO" && npm run build >/dev/null)  # the bootstrap VM is started by this checkout's envgit
   envgit init >/dev/null && echo 'backend: vm' > "$BOOT/.envgit/policy.yaml"
   envgit vm up --new
   if envgit run sh -c 'set -e; mkdir -p s/usr/local; tar -xJf node.tar.xz -C s/usr/local --strip-components 1;
       rm -f s/usr/local/CHANGELOG.md s/usr/local/README.md node.tar.xz;
+      install -m 755 rg s/usr/local/bin/rg; rm rg;
       mksquashfs s layer.squashfs -comp gzip -all-root -noappend -quiet; rm -rf s'; then ok=1; else ok=0; fi
   envgit vm down >/dev/null || true
   [ "$ok" = 1 ] && [ -s "$BOOT/layer.squashfs" ] || { echo "layer build failed" >&2; exit 1; }

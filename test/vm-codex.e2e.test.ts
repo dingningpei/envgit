@@ -99,9 +99,16 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1' || !hasCodex)('envgit as Codex
     expect(last.effects).toContainEqual({ kind: 'fs', op: 'write', path: 'notes.txt' })
   }, 60_000)
 
+  it('reads /work paths (what Codex sees in the guest) from the host mirror', async () => {
+    const meta = await call('fs/getMetadata', { path: 'file:///work/notes.txt', sandbox: null })
+    expect(meta.result).toMatchObject({ isFile: true })
+    const { out } = await start('v0', 'pwd', '')
+    expect(out).toBe('/work\n')
+  }, 60_000)
+
   it('pushes Codex file writes and removals into the guest as one step', async () => {
     const before = (await steps()).length
-    await call('fs/writeFile', { path: uri('app.py'), dataBase64: Buffer.from("print('patched in')\n").toString('base64'), sandbox: null })
+    await call('fs/writeFile', { path: 'file:///work/app.py', dataBase64: Buffer.from("print('patched in')\n").toString('base64'), sandbox: null })
     await call('fs/remove', { path: uri('notes.txt'), recursive: false, force: true, sandbox: null })
     const { out } = await start('v2', 'python3 app.py; test -e notes.txt && echo still-there || echo gone')
     expect(out).toBe('patched in\ngone\n')

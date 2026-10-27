@@ -3,7 +3,8 @@
 # (docs/design.md §3.6): the VM is booted from the L1 kernel, which has KVM, with the Ubuntu image and
 # Node layer as root and this repo at /repo. Needs scripts/vm/build.sh first.
 #
-#   scripts/vm/linux-test.sh [command ...]     (default: the vm e2e tests)
+#   scripts/vm/linux-test.sh [command ...]     (default: the vm e2e tests; the whole suite runs too:
+#   scripts/vm/linux-test.sh sh -c 'ENVGIT_VM_E2E=1 npx vitest run --no-file-parallelism')
 #
 # Inside, ENVGIT_VM_DIR=/cache/vm holds the Linux build (`scripts/vm/build.sh --linux-layout
 # ~/.cache/envgit/vm-linux/vm` writes it), and the repo's node_modules gets linux-arm64 rollup/esbuild

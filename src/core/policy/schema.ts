@@ -17,8 +17,11 @@ export interface Policy {
   }
   capabilities?: Record<string, boolean | string[]>
   irreversible?: IrreversibleRule[]
-  /** Workdir paths (prefixes) left out of snapshots. `.envgit` is always left out. */
-  snapshot?: { exclude?: string[] }
+  /**
+   * `exclude`: workdir paths (prefixes) left out of snapshots (`.envgit` always is).
+   * `maxBytes` (`500M`, `10G`, or bytes): drop the oldest rewind points to keep snapshots under it.
+   */
+  snapshot?: { exclude?: string[]; maxBytes?: number | string }
 }
 
 /** `ask` (default) a person, `deny`, or `allow` and just mark the step. */

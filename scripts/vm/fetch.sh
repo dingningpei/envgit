@@ -18,6 +18,7 @@ firecracker-v1.17.0-aarch64.tgz|https://github.com/firecracker-microvm/firecrack
 vmlinux-6.18.54|$FC_CI/vmlinux-6.18.54|e1db1d63d5e141bd65813600c9045c84d12ad5c9e8bfac09429425144a684263
 ubuntu-24.04-server-cloudimg-arm64-20260926.squashfs|$NOBLE/ubuntu-24.04-server-cloudimg-arm64.squashfs|41bd7ede9d97d14ab925836f653a2657d089505ed229cecafb0c4c78a7ebbc0a
 node-v24.21.0-linux-arm64.tar.xz|https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.xz|6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2
+ripgrep_14.1.0-1_arm64.deb|http://ports.ubuntu.com/ubuntu-ports/pool/universe/r/rust-ripgrep/ripgrep_14.1.0-1_arm64.deb|71fe8a5667bc87d2bca175a3426c6ec518e0679cc821d23ae7056de7096f04de
 "
 
 # The L1 kernel and its modules are only needed on macOS, where L1 is a VM; on Linux the host is L1.

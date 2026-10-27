@@ -7,6 +7,9 @@ import { runCodexWs, serveCodexStdio } from '../adapters/codex/serve.js'
 import { SrtRunner, VmRunner, type Runner } from '../adapters/codex/runners.js'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { serveUi } from '../ui/server.js'
+import { runHook, type HookEvent } from '../adapters/hooks/handler.js'
+import type { Agent } from '../adapters/hooks/normalize.js'
+import { compileClaudeSandbox } from '../core/policy/compile.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
 import { recordVmStep, reportMirror, withEgress } from '../core/env/vm-step.js'
@@ -24,6 +27,7 @@ import {
   liveSnapshots,
   openSession,
   readHead,
+  readPruned,
   readSteps,
   recordStep,
   releaseBusy,
@@ -36,6 +40,7 @@ import {
 } from '../core/snapshot/log.js'
 import type { Effect, SnapshotId } from '../core/env/backend.js'
 import { SnapshotStore } from '../core/snapshot/store.js'
+import { enforceCap, parseBytes } from '../core/snapshot/cap.js'
 import { ReplSession } from '../repl/session.js'
 import { VmReplSession } from '../repl/vm-session.js'
 import { runWorker } from '../repl/worker.js'
@@ -51,6 +56,9 @@ const help = `envgit — version control for agent execution environments
   envgit codex [args...] run Codex with envgit as its environment: each command it runs
                          is a step in the sandbox (srt or vm), each apply_patch a step
   envgit codex-exec-server   the same, as a stdio exec-server for ~/.codex/environments.toml
+  envgit claude [args...]  run Claude Code with envgit's hooks: each tool call that can change
+                         files is a step, irreversible commands are refused or asked (srt)
+  envgit hooks install|uninstall copilot   the same hooks for Copilot CLI (.github/hooks/envgit.json)
   envgit log                     show the steps leading to the current state
   envgit ui [--port N] [--open]  the session timeline in a browser: steps, effects, diffs,
                                  rewind and fork (loopback only, a token in the URL)
@@ -78,7 +86,10 @@ const DEFAULT_POLICY = fileURLToPath(new URL('../../examples/policy.yaml', impor
 const RELEVANT_DENIAL = /\b(file|network)-\S+\s+\S/
 
 function snapshotting(policy: Policy): Snapshotting {
-  return { store: new SnapshotStore(ROOT), workdir: process.cwd(), exclude: policy.snapshot?.exclude ?? [] }
+  const store = new SnapshotStore(ROOT)
+  const max = policy.snapshot?.maxBytes
+  const cap = max === undefined ? undefined : async () => void (await enforceCap({ root: ROOT, workdir: process.cwd(), maxBytes: parseBytes(max), store, log: line => console.error(line) }))
+  return { store, workdir: process.cwd(), exclude: policy.snapshot?.exclude ?? [], ...(cap && { cap }) }
 }
 
 const red = (s: string) => (process.stderr.isTTY ? `\x1b[31m${s}\x1b[0m` : s)
@@ -226,6 +237,95 @@ async function codexExecServer(): Promise<number> {
   return 0
 }
 
+async function noSnapshot(session: OpenSession, target: StepRef): Promise<string> {
+  const label = target === 'base' ? 'base' : `step ${target}`
+  return (await readPruned(session.dir)).has(target)
+    ? `${label} can no longer be restored: its snapshot was dropped to stay under snapshot.maxBytes (it stays in the log)`
+    : `${label} has no snapshot`
+}
+
+/** Claude Code and Copilot CLI run their own tools; envgit records them through hooks (src/adapters/hooks). */
+function hookCommand(agent: Agent, event: HookEvent): string {
+  return `"${process.execPath}" "${fileURLToPath(import.meta.url)}" hook ${agent} ${event}`
+}
+
+async function hook(argv: string[]): Promise<number> {
+  const [agent, event] = argv as [Agent, HookEvent]
+  if (!['claude-code', 'copilot'].includes(agent) || !['pre', 'post', 'post-failed', 'stop'].includes(event)) throw new Error('usage: envgit hook <claude-code|copilot> <pre|post|post-failed|stop>')
+  let input = ''
+  for await (const chunk of process.stdin) input += chunk
+  // Installed hooks also fire in directories envgit does not manage: then they do nothing.
+  if (!(await exists(POLICY))) return 0
+  try {
+    const policy = await requireInit()
+    if (policy.backend === 'vm') {
+      console.error('envgit: hooks record steps with fs-level snapshots on the host; this workdir uses backend: vm, so nothing is recorded')
+      return 0
+    }
+    const out = await runHook(agent, event, input, { root: ROOT, workdir: process.cwd(), policy, snapshotting: snapshotting(policy) })
+    if (out) process.stdout.write(out + '\n')
+  } catch (e) {
+    // Never wedge the agent; a pre hook that fails allows.
+    console.error(`envgit: hook ${event} failed: ${e instanceof Error ? e.message : e}`)
+  }
+  return 0
+}
+
+async function claude(argv: string[]): Promise<number> {
+  const policy = await requireInit()
+  if (policy.backend === 'vm') throw new Error('envgit claude: Claude Code runs its tools on the host, so it needs backend: srt (use `envgit mcp` to work inside the VM)')
+  const writers = 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit'
+  const settings = {
+    hooks: {
+      PreToolUse: [{ matcher: writers, hooks: [{ type: 'command', command: hookCommand('claude-code', 'pre'), timeout: 60 }] }],
+      PostToolUse: [{ matcher: writers, hooks: [{ type: 'command', command: hookCommand('claude-code', 'post'), timeout: 300 }] }],
+      Stop: [{ hooks: [{ type: 'command', command: hookCommand('claude-code', 'stop'), timeout: 300 }] }],
+    },
+    sandbox: compileClaudeSandbox(policy, process.cwd()),
+  }
+  // ENVGIT_CLAUDE_AGENT (a JSON argv) stands in for the claude binary, for tests.
+  const agent = process.env.ENVGIT_CLAUDE_AGENT ? (JSON.parse(process.env.ENVGIT_CLAUDE_AGENT) as string[]) : ['claude']
+  const ignore = () => {}
+  process.on('SIGINT', ignore)
+  try {
+    const child = spawn(agent[0]!, [...agent.slice(1), '--settings', JSON.stringify(settings), ...argv], { stdio: 'inherit' })
+    const code = await new Promise<number>((resolve, reject) => (child.on('error', reject), child.on('exit', (c, sig) => resolve(c ?? (sig ? 130 : 1)))))
+    const session = await openSession(ROOT, 'srt')
+    console.error(`envgit: Claude Code ran in session ${session.meta.id}; \`envgit log\` shows its steps`)
+    return code
+  } finally {
+    process.off('SIGINT', ignore)
+  }
+}
+
+const COPILOT_HOOKS = join(process.cwd(), '.github', 'hooks', 'envgit.json')
+
+async function hooksCmd(argv: string[]): Promise<number> {
+  const [verb, agent] = argv
+  if (agent !== 'copilot' || (verb !== 'install' && verb !== 'uninstall')) throw new Error('usage: envgit hooks install|uninstall copilot')
+  if (verb === 'uninstall') {
+    await rm(COPILOT_HOOKS, { force: true })
+    console.error(`envgit: removed ${relative(process.cwd(), COPILOT_HOOKS)}`)
+    return 0
+  }
+  const policy = await requireInit()
+  if (policy.backend === 'vm') throw new Error('envgit hooks: Copilot runs its tools on the host, so it needs backend: srt')
+  const cmd = (event: HookEvent) => ({ type: 'command', bash: hookCommand('copilot', event), timeoutSec: 300 })
+  const config = {
+    version: 1,
+    hooks: {
+      preToolUse: [{ ...cmd('pre'), matcher: 'bash|powershell|edit|create' }],
+      postToolUse: [{ ...cmd('post'), matcher: 'bash|powershell|edit|create' }],
+      postToolUseFailure: [{ ...cmd('post-failed'), matcher: 'bash|powershell|edit|create' }],
+      agentStop: [cmd('stop')],
+    },
+  }
+  await mkdir(join(process.cwd(), '.github', 'hooks'), { recursive: true })
+  await writeFile(COPILOT_HOOKS, JSON.stringify(config, null, 2) + '\n')
+  console.error(`envgit: wrote ${relative(process.cwd(), COPILOT_HOOKS)} — it names this machine's node and envgit paths, so keep it out of commits`)
+  return 0
+}
+
 function parseRef(arg: string | undefined): StepRef {
   if (arg === 'base') return 'base'
   if (arg && /^\d+$/.test(arg)) return Number(arg)
@@ -235,6 +335,7 @@ function parseRef(arg: string | undefined): StepRef {
 async function requireInit(): Promise<Policy> {
   if (!(await exists(POLICY))) throw new Error('no .envgit/policy.yaml here — run `envgit init` first')
   const policy = await loadPolicy(POLICY)
+  if (policy.snapshot?.maxBytes !== undefined) parseBytes(policy.snapshot.maxBytes)
   await recoverRestore(policy)
   return policy
 }
@@ -304,10 +405,11 @@ async function log(): Promise<number> {
   const steps = await readSteps(session.dir)
   const head = await readHead(session.dir)
   const chain = activeChain(steps, head)
+  const pruned = await readPruned(session.dir)
   const short = (id?: string) => (id ? id.slice(0, 8) : '--------')
   const from = session.meta.forkedFrom
   console.log(`session ${session.meta.id}${from ? ` (forked from ${from.session} step ${from.step})` : ''}`)
-  console.log(`  base  ${short(session.meta.base)}`)
+  console.log(`  base  ${pruned.has('base') ? 'pruned  ' : short(session.meta.base)}`)
   for (const st of chain) {
     const input =
       st.action.type === 'exec'
@@ -321,7 +423,7 @@ async function log(): Promise<number> {
       st.startedAt.slice(11, 19),
       (st.action.type === 'checkpoint' ? 'ckpt' : st.action.type).padEnd(4),
       `exit ${st.exitCode}`.padEnd(7),
-      short(st.snapshot),
+      pruned.has(st.index) ? 'pruned  ' : short(st.snapshot),
       (input.length > 60 ? input.slice(0, 59) + '…' : input).padEnd(60),
       denied ? `${denied} denied` : '',
       st.irreversible ? red(`irreversible: ${st.irreversible.reason}`) : '',
@@ -340,7 +442,7 @@ async function rewind(args: string[]): Promise<number> {
   const session = await openSession(ROOT, 'srt')
   const snap = snapshotting(policy)
   const targetId = await snapshotOf(session, target)
-  if (!targetId) throw new Error(`step ${target} has no snapshot`)
+  if (!targetId) throw new Error(await noSnapshot(session, target))
 
   const busy = await busyHolder(ROOT)
   if (busy !== undefined) {
@@ -384,7 +486,7 @@ async function fork(args: string[]): Promise<number> {
   const policy = await requireInit()
   const session = await openSession(ROOT, 'srt')
   const id = await snapshotOf(session, target)
-  if (!id) throw new Error(`step ${target} has no snapshot`)
+  if (!id) throw new Error(await noSnapshot(session, target))
 
   // Built next to the target and renamed into place, so a fork is all or nothing. The temp name is
   // fixed, so a retry after a crash clears what the failed attempt left.
@@ -453,7 +555,17 @@ async function sessionCmd(args: string[]): Promise<number> {
 }
 
 async function gc(): Promise<number> {
-  await requireInit()
+  const policy = await requireInit()
+  const max = policy.snapshot?.maxBytes
+  if (max !== undefined) {
+    await acquireBusy(ROOT)
+    try {
+      const r = await enforceCap({ root: ROOT, workdir: process.cwd(), maxBytes: parseBytes(max), store: new SnapshotStore(ROOT), log: line => console.error(line) }, { force: true })
+      if (!r) console.error(`envgit: snapshots are under snapshot.maxBytes (${String(max)})`)
+    } finally {
+      await releaseBusy(ROOT)
+    }
+  }
   const live = await liveSnapshots(ROOT)
   const r = await new SnapshotStore(ROOT).gc(live)
   const v = await gcVmSnapshots(process.cwd(), live)
@@ -698,6 +810,15 @@ try {
       break
     case 'codex-exec-server':
       code = await codexExecServer()
+      break
+    case 'claude':
+      code = await claude(args)
+      break
+    case 'hooks':
+      code = await hooksCmd(args)
+      break
+    case 'hook':
+      code = await hook(args)
       break
     case 'mcp':
       if (args[0] === '--worker') {

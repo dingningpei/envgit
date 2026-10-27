@@ -169,6 +169,7 @@ function render() {
   if (!S.session) { tl.replaceChildren(el('p', { class: 'empty' }, 'No session yet: run a step (envgit run, envgit mcp, envgit codex).')); return }
   const { steps, head, chain, meta } = S.session
   const onChain = new Set(chain)
+  const pruned = new Set(S.session.pruned || [])
   const kids = new Map()
   for (const st of steps) {
     const p = st.parent === undefined ? 'base' : st.parent
@@ -182,7 +183,7 @@ function render() {
     const cs = (kids.get(key) || []).slice().sort((a, b) => (onChain.has(b.index) - onChain.has(a.index)) || a.index - b.index)
     cs.forEach((st, i) => {
       const d = i === 0 ? depth : depth + 1
-      rows.push(stepRow(st, d, onChain.has(st.index), st.index === head))
+      rows.push(stepRow(st, d, onChain.has(st.index), st.index === head, pruned.has(st.index)))
       walk(st.index, d)
     })
   }
@@ -215,15 +216,17 @@ function baseRow(meta, head) {
       el('span', { class: 'sum muted' }, 'the workdir before the first step')))
 }
 
-function stepRow(st, depth, on, isHead) {
+function stepRow(st, depth, on, isHead, isPruned) {
   const c = counts(st)
   const chips = []
+  if (isPruned) chips.push(el('span', { class: 'chip' }, 'pruned'))
   if (st.exitCode !== 0) chips.push(el('span', { class: 'chip bad' }, 'exit ' + st.exitCode))
   if (c.write || c.del) chips.push(el('span', { class: 'chip' }, (c.write + c.del) + ' file' + (c.write + c.del > 1 ? 's' : '')))
   if (c.net) chips.push(el('span', { class: 'chip' }, c.net + ' request' + (c.net > 1 ? 's' : '')))
   if (c.netDenied || c.policy) chips.push(el('span', { class: 'chip bad' }, (c.netDenied + c.policy) + ' denied'))
   if (st.irreversible) chips.push(el('span', { class: 'chip warn' }, 'irreversible'))
   if (st.codex) chips.push(el('span', { class: 'chip' }, 'codex'))
+  if (st.agent) chips.push(el('span', { class: 'chip' }, st.agent.name + ' · ' + st.agent.tool))
   chips.push(el('span', { class: 'chip' }, time(st.startedAt)))
   return el('div', { class: 'row' + (on ? '' : ' off') + (selected === st.index ? ' sel' : ''), onclick: () => { if (selected !== st.index) flash = null; selected = st.index; render() } },
     rail(depth, (isHead ? 'head ' : '') + (st.exitCode !== 0 || st.irreversible ? 'bad' : '')),
@@ -238,13 +241,14 @@ let detailKey = ''
 function showDetail() {
   const d = document.getElementById('detail')
   const { steps, meta, head } = S.session
+  const pruned = new Set(S.session.pruned || [])
   const key = meta.id + ':' + selected + ':' + (selected === 'base' ? head : JSON.stringify(steps[selected])) + ':' + head + ':' + S.current
   if (key === detailKey) return
   detailKey = key
   const isCurrent = meta.id === S.current
   if (selected === 'base') {
     d.replaceChildren(el('h2', {}, 'Base'), el('p', { class: 'muted' }, 'The workdir as it was before the first step of session ' + meta.id + '.'),
-      isCurrent ? actions('base', head === 'base') : '')
+      pruned.has('base') ? el('div', { class: 'banner warn' }, 'The base snapshot was dropped to stay under snapshot.maxBytes.') : isCurrent ? actions('base', head === 'base') : '')
     return
   }
   const st = steps[selected]
@@ -267,9 +271,10 @@ function showDetail() {
       el('dt', {}, 'exit'), el('dd', { class: st.exitCode ? 'mono chip bad' : 'mono' }, st.exitCode),
       el('dt', {}, 'when'), el('dd', {}, new Date(st.startedAt).toLocaleString() + ' · ' + (ms >= 1000 ? (ms / 1000).toFixed(1) + ' s' : ms + ' ms')),
       el('dt', {}, 'parent'), el('dd', { class: 'mono' }, st.parent === undefined ? 'base' : '#' + st.parent),
-      el('dt', {}, 'snapshot'), el('dd', { class: 'mono' }, short(st.snapshot)),
-      st.codex ? [el('dt', {}, 'codex call'), el('dd', { class: 'mono' }, st.codex.toolCallId)] : ''),
-    isCurrent ? actions(st.index, st.index === head) : '',
+      el('dt', {}, 'snapshot'), el('dd', { class: 'mono' }, pruned.has(st.index) ? 'pruned' : short(st.snapshot)),
+      st.codex ? [el('dt', {}, 'codex call'), el('dd', { class: 'mono' }, st.codex.toolCallId)] : '',
+      st.agent ? [el('dt', {}, st.agent.name), el('dd', { class: 'mono' }, st.agent.tool + (st.agent.toolUseId ? ' · ' + st.agent.toolUseId : ''))] : ''),
+    pruned.has(st.index) ? el('div', { class: 'banner warn' }, 'Its snapshot was dropped to stay under snapshot.maxBytes: this step stays in the log but can no longer be rewound or forked to.') : isCurrent ? actions(st.index, st.index === head) : '',
     groups.length ? el('h3', {}, 'Effects') : '',
     ...groups.map(([name, items]) => el('details', { open: items.length <= 20 && !name.startsWith('Sandbox noise') },
       el('summary', {}, name + ' (' + items.length + ')'), el('ul', {}, items.slice(0, 1000).map(i => el('li', { class: 'mono' }, i))))),

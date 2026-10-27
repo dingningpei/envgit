@@ -64,7 +64,9 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     ])
   }, 30_000)
 
-  it('denies policy-protected reads and logs them on the right step', async () => {
+  // macOS only: there Seatbelt refuses the read; on Linux srt mounts an empty tmpfs over a denied
+  // directory, so the read succeeds and shows nothing — hidden, but no denial to record.
+  it.skipIf(process.platform !== 'darwin')('denies policy-protected reads and logs them on the right step', async () => {
     const ssh = join(homedir(), '.ssh')
     const r = await execute(`await fs.readdir(${JSON.stringify(ssh)})`)
     expect(r.isError).toBe(true)

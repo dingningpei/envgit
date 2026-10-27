@@ -165,6 +165,18 @@ export class SnapshotStore {
     return join(this.objects(), hash)
   }
 
+  /** Paths whose entry differs between two snapshots (`before` undefined: everything in `after` is new). */
+  async changes(before: SnapshotId | undefined, after: SnapshotId): Promise<{ path: string; op: 'write' | 'delete'; kind: Entry['kind'] }[]> {
+    const prev = new Map(before && (await this.has(before)) ? (await this.read(before)).entries.map(e => [e.path, e]) : [])
+    const next = new Map((await this.read(after)).entries.map(e => [e.path, e]))
+    const same = (a: Entry, b: Entry) =>
+      a.kind === b.kind && (a.kind === 'file' ? a.hash === (b as typeof a).hash && a.mode === (b as typeof a).mode : a.kind === 'symlink' ? a.target === (b as typeof a).target : true)
+    const out: { path: string; op: 'write' | 'delete'; kind: Entry['kind'] }[] = []
+    for (const [path, e] of next) if (!prev.has(path) || !same(prev.get(path)!, e)) out.push({ path, op: 'write', kind: e.kind })
+    for (const [path, e] of prev) if (!next.has(path)) out.push({ path, op: 'delete', kind: e.kind })
+    return out.sort((a, b) => a.path.localeCompare(b.path))
+  }
+
   /** A file's contents as stored, by its manifest hash. */
   async readBlob(hash: string): Promise<Buffer> {
     if (!/^[0-9a-f]+$/.test(hash)) throw new Error(`not a blob hash: ${hash}`)

@@ -89,7 +89,11 @@ func main() {
 	mount("tmpfs", root+"/dev/shm", "tmpfs", 0, "")
 	mount("tmpfs", root+"/tmp", "tmpfs", 0, "size=60%")
 	mount("tmpfs", root+"/run", "tmpfs", 0, "")
-	must(syscall.Chroot(root), "chroot")
+	// switch_root, not a bare chroot: a chrooted process may not create user namespaces, which
+	// bubblewrap (srt on Linux) needs. Moving the new root onto / makes it the namespace's root.
+	must(os.Chdir(root), "chdir newroot")
+	must(syscall.Mount(".", "/", "", syscall.MS_MOVE, ""), "move newroot")
+	must(syscall.Chroot("."), "chroot")
 	must(os.Chdir("/repo"), "chdir")
 
 	env := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "TERM=dumb", "LANG=C.UTF-8"}

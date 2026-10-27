@@ -161,6 +161,31 @@ describe.skipIf(!hasCodex || (process.platform !== 'darwin' && process.platform 
     seen = recorded.length
   }, 30_000)
 
+  it('passes process/write to an interactive command, ^C as an interrupt', async () => {
+    const begin = (pid: string, script: string, extra: object) =>
+      h.call('process/start', { processId: pid, argv: ['/bin/sh', '-lc', script], cwd: pathToFileURL(dir).href, env: {}, ...extra })
+    const write = (pid: string, s: string) => h.call('process/write', { processId: pid, chunk: Buffer.from(s).toString('base64'), writeId: pid + s.length })
+    const exited = (pid: string) => h.until(m => m.method === 'process/exited' && m.params.processId === pid)
+    const output = (pid: string) =>
+      h.notes.filter(m => m.method === 'process/output' && m.params.processId === pid).map(m => Buffer.from(m.params.chunk, 'base64').toString()).join('')
+
+    await begin('i1', 'read a; echo "got:$a"', { tty: true })
+    expect((await write('i1', 'hello\n')).result).toEqual({ status: 'accepted' })
+    expect((await exited('i1')).params.exitCode).toBe(0)
+    expect(output('i1')).toBe('got:hello\n')
+    expect((await write('i1', 'late\n')).result).toEqual({ status: 'stdinClosed' })
+
+    await begin('i2', 'sleep 30', { tty: true })
+    await write('i2', '\x03')
+    expect((await exited('i2')).params.exitCode).toBe(130)
+
+    await begin('i3', 'sleep 0.2', { tty: false, pipeStdin: false })
+    expect((await write('i3', 'x')).result).toEqual({ status: 'stdinClosed' })
+    await exited('i3')
+    expect((await write('nope', 'x')).result).toEqual({ status: 'unknownProcess' })
+    seen = (await steps()).length
+  }, 30_000)
+
   it('refuses commands an irreversible shell rule denies, even inside the shell script', async () => {
     const { exitCode, out } = await start('p3', 'git status >/dev/null 2>&1; git push origin main')
     expect(exitCode).toBe(126)

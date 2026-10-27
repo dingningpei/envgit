@@ -40,9 +40,9 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1')('vm backend (e2e, ENVGIT_VM_E
     expect(meta.kind).toBe('Full')
   })
 
-  it('has git, node and python in the guest', async () => {
-    const r = await envgit('run', 'sh', '-c', 'git --version; node -v; npm -v; python3 --version')
-    expect(r.stdout).toMatch(/^git version 2\.\d+.*\nv24\.\d+\.\d+\n\d+\.\d+\.\d+\nPython 3\.\d+/s)
+  it('has git, node, python and ripgrep in the guest', async () => {
+    const r = await envgit('run', 'sh', '-c', 'git --version; node -v; npm -v; python3 --version; rg --version | head -1')
+    expect(r.stdout).toMatch(/^git version 2\.\d+.*\nv24\.\d+\.\d+\n\d+\.\d+\.\d+\nPython 3\.\d+.*\nripgrep 14\.1\.0/s)
   }, 120_000)
 
   it('runs commands in the guest on files imported from the host', async () => {

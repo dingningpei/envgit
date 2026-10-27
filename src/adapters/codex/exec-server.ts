@@ -158,6 +158,7 @@ export class CodexExecServer {
 
   private async dispatch(m: Msg): Promise<void> {
     if (!m.method) return
+    if (this.runner?.mapParams && m.params != null) m.params = this.runner.mapParams(m.params)
     switch (m.method) {
       case 'initialize':
         return this.initialize(m)
@@ -170,8 +171,12 @@ export class CodexExecServer {
         return this.processStart(m)
       case 'process/read':
         return this.processRead(m)
-      case 'process/write':
-        return this.reply(m.id, { status: this.procs.has(m.params?.processId) ? 'stdinClosed' : 'unknownProcess' })
+      case 'process/write': {
+        const p = this.procs.get(m.params?.processId)
+        if (!p) return this.reply(m.id, { status: 'unknownProcess' })
+        const ok = p.exitCode === undefined && p.handle.write(Buffer.from(String(m.params?.chunk ?? ''), 'base64'))
+        return this.reply(m.id, { status: ok ? 'accepted' : 'stdinClosed' })
+      }
       case 'process/signal':
       case 'process/terminate': {
         const p = this.procs.get(m.params?.processId)

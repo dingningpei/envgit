@@ -11,7 +11,7 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { SnapshotId } from '../core/env/backend.js'
-import { activeChain, busyHolder, readHead, type SessionMeta, type Step } from '../core/snapshot/log.js'
+import { activeChain, busyHolder, readHead, readPruned, type SessionMeta, type Step } from '../core/snapshot/log.js'
 import type { Entry } from '../core/snapshot/store.js'
 import { SnapshotStore } from '../core/snapshot/store.js'
 import { unifiedDiff, type Hunk } from './diff.js'
@@ -133,7 +133,7 @@ async function state(o: UiOptions, selected?: string) {
     sessions,
     policyBackend: /^backend:\s*vm\b/m.test(policy) ? 'vm' : 'srt',
     busy,
-    session: { meta, head, steps, chain: activeChain(steps, head).map(s => s.index) },
+    session: { meta, head, steps, chain: activeChain(steps, head).map(s => s.index), pruned: [...(await readPruned(dir))] },
   }
 }
 
@@ -147,7 +147,10 @@ async function diff(o: UiOptions, sessionId: string, index: number) {
   const steps = await readStepsLive(join(o.root, 'sessions', sessionId))
   const step = steps[index]
   if (!step?.snapshot) return { error: 'no such step, or it has no snapshot' }
-  const parentId = step.parent === undefined ? meta.base : steps[step.parent]?.snapshot
+  const gone = await readPruned(join(o.root, 'sessions', sessionId))
+  if (gone.has(index)) return { unavailable: 'this step’s snapshot was dropped to stay under snapshot.maxBytes; its file effects above still list what it changed' }
+  const parentRef = step.parent ?? 'base'
+  const parentId = gone.has(parentRef) ? undefined : step.parent === undefined ? meta.base : steps[step.parent]?.snapshot
   const store = new SnapshotStore(o.root)
   const read = async (id: SnapshotId | undefined) => (id && (await store.has(id)) ? new Map((await store.read(id)).entries.map(e => [e.path, e])) : undefined)
   const [before, after] = [await read(parentId), await read(step.snapshot)]

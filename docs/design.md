@@ -81,21 +81,28 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 - Only `print()` / return value goes back to the model; everything else stays in the sandbox.
 - Each `execute` is one Step → one snapshot. On the vm backend the worker runs inside the guest and
   is part of that snapshot, so `rewind` restores REPL variables too (§3.6); on srt it resets them.
-- Effects for a REPL step are recorded by the injected capability wrappers (files read/written, hosts contacted, denials), since the macOS sandbox violation log drops events for long-lived processes; the backend's violation log is a best-effort supplement.
+- Effects for a REPL step are recorded by the injected capability wrappers (files read/written, hosts contacted, denials), since the macOS sandbox violation log drops events for long-lived processes; the backend's violation log is a best-effort supplement. On Linux srt hides a read-denied directory under an empty tmpfs instead of refusing the read, so such reads come back empty and no denial is recorded; on macOS Seatbelt refuses them and the step records `denied`.
 - No shell-string API by default; typed command capabilities instead.
 
 ### 3.4 Adapters (`src/adapters`)
 
-- `claude-code`, `copilot`: translate policy to native config; expose envgit as a remote/self-hosted environment where the vendor protocol allows.
+- `claude-code`, `copilot` (`src/adapters/hooks`): neither hands its tools to an external environment, but both run hook commands around each tool call with the call as JSON on stdin, and envgit records through those. The agent still executes the tool itself, in its own sandbox; `envgit hook <agent> <event>` does the rest:
+  - **pre** (before a tool runs): takes the session's base snapshot on first use, and judges shell commands (`Bash`/`bash`, `PowerShell`) against the shell `irreversible` rules, split as for Codex. A `deny` rule refuses the call; an `ask` rule answers `ask`, so the agent's own approval prompt asks the person (the step is then marked irreversible, "approved in <agent>").
+  - **post** (after a tool that can change files: Bash, PowerShell, Monitor, Edit, Write, NotebookEdit; Copilot's bash, powershell, edit, create): an fs-level snapshot of the workdir as a step (`exec` with the command, or `fs` with the paths), its effects the files that differ from the head's snapshot, with the agent, tool and tool-call id. Copilot's `postToolUseFailure` records it with exit 1.
+  - **stop** (end of a turn: Claude Code's `Stop`, Copilot's `agentStop`): a `ckpt` step if the workdir changed outside tool calls — a background process's writes, which `PostToolUse` cannot see.
+  - A hook never wedges the agent: it exits 0, errors go to stderr, a failing pre hook allows. In a directory without `.envgit` it does nothing; with `backend: vm` it records nothing (the tools run on the host).
+  - `envgit claude [args]` runs `claude --settings <json>` with these hooks for that invocation only (no change to `~/.claude`), plus Claude Code's own `sandbox` settings compiled from the policy (filesystem allow/deny made absolute, network hosts without ports, `.envgit` write-denied). That sandbox has no request-level rules, so `network.l7` and irreversible net rules are not enforced under Claude Code — only shell rules, by the pre hook.
+  - Copilot CLI takes no per-invocation hooks, so `envgit hooks install copilot` writes `.github/hooks/envgit.json` (version 1; `uninstall` removes it). It names this machine's node and envgit, so it is not for committing.
+  - Tested with scripted hook payloads and a stand-in for `claude` that runs the hooks from `--settings`; not yet against a real Claude Code or Copilot session.
 - `codex` (`src/adapters/codex`, written against Codex 0.162.1, whose `codex exec-server` is still marked experimental): Codex sends every command and file operation of a turn to an *exec-server* — JSON-RPC: `process/start|read|write|signal|terminate` with `process/output|exited|closed` notifications, and `fs/*` — and envgit stands in as that server. `envgit codex [args]` runs Codex with `CODEX_EXEC_SERVER_URL` pointing at a loopback WebSocket on a random path (the URL is the only credential Codex sends for it), so `~/.codex` is not touched; `envgit codex-exec-server` serves the same over stdio for an `environments.toml` entry (`program = "envgit"`). Behind it, envgit runs a real `codex exec-server --listen stdio`:
   - `process/start` is run by envgit's backend — srt's sandbox, envgit's policy and gate, not the sandbox Codex asks for — and each process is a step (exec, its argv, Codex's tool-call id). The step is recorded before `process/exited` goes back: Codex's next request may build on it. Output streams as it comes and stays buffered for `process/read`.
   - `fs/writeFile|createDirectory|remove|copy` (apply_patch's path) are forwarded and recorded as one `fs` step per burst — closed by 150 ms of quiet or the next `process/start`.
   - Everything else — metadata and reads (Codex walks up for `.git`, `AGENTS.md`, skills), `environmentConfig/read`, capability discovery, `http/request` — is forwarded unchanged. `http/request` is Codex fetching through the environment, so it does **not** pass envgit's gate.
   - `initialize` answers with the real server's executor info, minus `fileWriteStreaming`, `sandboxedFileStreaming`, `networkProxyLaunch` and `shellSnapshotV2`, which envgit does not serve.
   - Shell `irreversible` rules see the commands inside Codex's `zsh -lc '<script>'`, split on newlines, `;`, `&&`, `||` and `|` (a best effort; net rules enforce). `ask` rules deny: the protocol has no way to ask Codex's user, and Codex owns the terminal.
-  - On the vm backend (`envgit vm up` first) commands run in L2, in the `/work` directory matching Codex's cwd, as vm steps — snapshot, mirror sync, egress through the host gate — so `rewind` brings back processes too. `initialize` tells Codex the guest's shell (bash; L2 has no zsh) and OS, and drops the host's `prependPathDirs`. Codex's fs calls still go to the host workdir, which mirrors /work after every step; its writes and removals are pushed into the guest, like `envgit vm push`, as the fs step. L2's exec returns only when the command ends, so output comes in one piece, commands run one at a time, and `process/terminate` cannot stop one (L2's 10-minute limit does): a command that never exits, such as a dev server, holds up every later one until then, so on vm start servers in the background (`… &`; L2 stops waiting for a backgrounded child's output after 200 ms). Absolute host paths in a command do not exist in the guest.
+  - On the vm backend (`envgit vm up` first) commands run in L2, in the `/work` directory matching Codex's cwd, as vm steps — snapshot, mirror sync, egress through the host gate — so `rewind` brings back processes too. `initialize` tells Codex the guest's shell (bash; L2 has no zsh) and OS, and drops the host's `prependPathDirs`. Codex's fs calls still go to the host workdir, which mirrors /work after every step — and since commands show Codex `/work` (`pwd`), `file:///work/…` in any request is read as the host workdir; its writes and removals are pushed into the guest, like `envgit vm push`, as the fs step. L2's exec returns only when the command ends, so output comes in one piece, commands run one at a time, and `process/terminate` cannot stop one (L2's 10-minute limit does): a command that never exits, such as a dev server, holds up every later one until then, so on vm start servers in the background (`… &`; L2 stops waiting for a backgrounded child's output after 200 ms). Absolute host paths in a command do not exist in the guest.
   - Denials as Codex sees them: `process/exited` always says `sandboxDenied: false`. On srt the reported sandbox type is Seatbelt / seccomp, so Codex's own heuristic reads a failed command whose output says "operation not permitted", "permission denied" and the like as a sandbox denial (its TUI may then offer to retry with more permissions, which envgit's policy judges the same way again); on vm the type is `none`, which that heuristic never flags.
-  - Seen in a capture of a real `codex exec`: one non-PTY process per shell tool call; a real `codex exec` through `envgit codex` on srt (apply_patch on two files, then commands) recorded exec, fs, exec. Tests replay the protocol with a scripted client, never OpenAI. Not covered: PTY sessions and `process/write` (the TUI's interactive commands get `stdinClosed`), and concurrent commands' net effects on srt (the gate is per process, so they are attributed to whichever ends first).
+  - Seen in a capture of a real `codex exec`: one non-PTY process per shell tool call; a real `codex exec` through `envgit codex` (apply_patch on two files, then commands) recorded exec, fs, exec on srt, and the same on vm — where it also showed Codex naming `/work/…` paths and reaching for `rg`, hence the mapping above and ripgrep in L2. Tests replay the protocol with a scripted client, never OpenAI. Interactive commands (`tty` / `pipeStdin`, the TUI's write_stdin) get a stdin pipe on srt that `process/write` feeds, with ^C as SIGINT and ^D as end of input — but no PTY (that needs a native module), so programs see no terminal; on vm, L2's exec has no stdin and writes get `stdinClosed`. Not covered: concurrent commands' net effects on srt (the gate is per process, so they are attributed to whichever ends first).
 - `mcp`: expose the REPL as an MCP server so any client can use it without native support.
 
 ### 3.5 fs-level snapshots on srt (`src/core/snapshot/store.ts`)
@@ -128,6 +135,16 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 - `.envgit` is always excluded from snapshots and always in srt's `denyWrite`, so the sandbox cannot
   rewrite its own history. `snapshot.exclude` in the policy leaves more paths out.
 - Limits: files only, no memory or processes — that needs the VM tier.
+- **Size cap** (`src/core/snapshot/cap.ts`, both backends): with `snapshot.maxBytes` (`500M`, `10G`, or
+  bytes) in the policy, envgit measures the snapshots after each recorded step — at most once a minute
+  while under the cap, every step once over — and drops rewind points until they fit: first what
+  nothing refers to, then whole older sessions, then the current session's abandoned branches (whole
+  subtrees, oldest first), then its current branch from the oldest step on, always keeping base, head
+  and the last 10 steps. A dropped step stays in the log (`log` and the UI mark it `pruned`; `rewind`
+  and `fork` to it say why they cannot); the session's `pruned` file lists steps, not snapshot ids,
+  because srt ids are content hashes another step may share. It runs under the busy lock, so gc needs
+  no grace period there; `envgit gc` runs it too. On vm, dropping a step on the current branch first
+  folds its diff into each child (§3.6), so the children no longer build on it.
 
 ### 3.6 VM backend: Firecracker, nested on macOS, direct on Linux (`src/core/env/vm.ts`, `vm/`)
 
@@ -155,7 +172,8 @@ envgit (TS) ──unix socket── envgit-vm (Swift, Virtualization.framework) 
   images, passed through to Firecracker as L2's drives, so they are read on demand rather than held
   in RAM), no network; one virtiofs share, the workdir's `.envgit/vm/snaps`, where every snapshot goes.
 - **L2** boots the Firecracker CI kernel with our Go agent as its initrd. The agent overlays a tmpfs
-  on two read-only squashfs layers — Node 24 (`/usr/local`) over the Ubuntu 24.04 server cloud image
+  on two read-only squashfs layers — Node 24 and ripgrep (`/usr/local`; agents such as Codex search
+  with `rg`) over the Ubuntu 24.04 server cloud image
   (git, python3, curl, build tools from apt are a `run` away now that there is egress) — and runs
   commands via `chroot` with `/work` as cwd. Child processes outlive the command that started them;
   the agent reaps them as PID 1. Both images are pinned (the cloud image by dated release and the
@@ -268,7 +286,11 @@ sparse version, rebuilt from the packed copy);
   first `execute` (worker install included) ≈ 3.5 s, against ≈ 11 s and ≈ 16 s after a cold boot;
   a `fetch` in the REPL 1–4 s. Each step still pays the dirty-tracking trap for the pages it writes
   again, so even a warm `envgit run node -e 1` takes ≈ 1–1.5 s end to end.
-- **Not yet:** a cap on the disk the snapshots take besides `envgit gc`.
+- **Size cap:** `snapshot.maxBytes` (§3.5) applies here too. A step on the current branch can only go
+  once nothing builds on it, so its diff is folded into each child first: both are sorted extent lists
+  (`mem.idx`), merged with the child's pages winning (what `rebase-snap` does at restore), and the
+  child's `meta.json` re-parented to the dropped step's parent; its machine state is unchanged. The
+  folded copy replaces the child via a rename, and a crash in between is undone on the next gc or fold.
 
 ### 3.7 Timeline UI (`src/ui`)
 
@@ -332,7 +354,7 @@ normalized path (ambiguous spellings like `/a/../b` are refused). Checked with c
 2. **M1** — REPL with persistent state and capability injection, exposed as an MCP server. Demo ([`demo-m1.md`](demo-m1.md)): 1.6× fewer context tokens on a 48 KB task, 9.4× (3.8× cost) on a 380 KB task where per-capability tools hit Claude Code's result-size limit and got the answer wrong.
 3. **M2** — per-step snapshots; `envgit log`, `envgit fork <step>`, `envgit rewind <step>`. Done first on srt with fs-level snapshots (below), because Firecracker needs Linux + KVM; the Firecracker backend moves to M2.5.
    - **M2.5** — Firecracker backend (Linux + KVM): full memory + disk snapshots behind the same `log` / `fork` / `rewind`.
-4. **M3** — irreversible-action gating through the egress proxy (done on srt, §4); Codex environment adapter (§3.4).
+4. **M3** — irreversible-action gating through the egress proxy (done on srt, §4); Codex environment adapter, Claude Code and Copilot CLI through hooks (§3.4).
 5. **M4** — web UI timeline (`envgit ui`, §3.7). The Apple Virtualization backend it also listed became the vm backend's L1 on macOS (§3.6) rather than a backend of its own.
 
 ## 6. Prior art

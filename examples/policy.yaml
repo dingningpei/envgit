@@ -25,3 +25,4 @@ irreversible:
 # (an unchanged tree costs one stat per file, so large dirs are usually fine).
 # snapshot:
 #   exclude: ["node_modules"]
+#   maxBytes: 10G      # drop the oldest rewind points (never base, head or the last 10 steps) to stay under

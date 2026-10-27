@@ -1,6 +1,7 @@
 /** Policy → srt settings. See docs/design.md §3.2 */
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { needsInspection, type Gate } from './gate.js'
+import { join } from 'node:path'
 import type { Policy } from './schema.js'
 
 /**
@@ -34,5 +35,28 @@ export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath:
       // The sandbox must never rewrite its own history or snapshots.
       denyWrite: [...(fs.write?.deny ?? []), '.envgit'],
     },
+  }
+}
+
+/**
+ * Policy → Claude Code's own `sandbox` settings (for `envgit claude`), which wrap its Bash in srt too.
+ * Paths are made absolute against the workdir; hosts lose their `:port` (Claude's allowlist is by
+ * domain). Its sandbox has no request-level rules, so `network.l7` and irreversible net rules are not
+ * enforced there — envgit's pre hook only judges command lines (docs/design.md §3.4).
+ */
+export function compileClaudeSandbox(policy: Policy, workdir: string): Record<string, unknown> {
+  const fs = policy.filesystem ?? {}
+  const net = policy.network ?? {}
+  const abs = (p: string) => (p === '.' ? workdir : p.startsWith('/') || p.startsWith('~') || p.includes('*') ? p : join(workdir, p))
+  const host = (h: string) => h.replace(/:\d+$/, '')
+  return {
+    enabled: true,
+    filesystem: {
+      allowRead: (fs.read?.allow ?? []).map(abs),
+      denyRead: (fs.read?.deny ?? []).map(abs),
+      allowWrite: (fs.write?.allow ?? []).map(abs),
+      denyWrite: [...(fs.write?.deny ?? []).map(abs), join(workdir, '.envgit')],
+    },
+    network: { allowedDomains: (net.allow ?? []).map(host), deniedDomains: (net.deny ?? []).map(host) },
   }
 }
