@@ -85,7 +85,7 @@ async function post(ev: ToolEvent, failed: boolean, ctx: HookContext): Promise<v
   const rel = (p: string) => (isAbsolute(p) ? relative(ctx.workdir, p) : p)
   const action: Step['action'] = ev.command
     ? { type: 'exec', input: JSON.stringify([ev.command]) }
-    : { type: 'fs', input: JSON.stringify(ev.paths.map(p => ({ op: 'write', path: rel(p) }))) }
+    : { type: 'fs', input: JSON.stringify([...new Set(ev.paths.map(rel))].map(path => ({ op: 'write', path }))) }
   await recordStep(session, { ...ctx.snapshotting, take: async () => id as SnapshotId }, {
     startedAt: new Date().toISOString(),
     endedAt: new Date().toISOString(),

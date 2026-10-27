@@ -8,7 +8,7 @@ import { SrtRunner, VmRunner, type Runner } from '../adapters/codex/runners.js'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { serveUi } from '../ui/server.js'
 import { runHook, type HookEvent } from '../adapters/hooks/handler.js'
-import type { Agent } from '../adapters/hooks/normalize.js'
+import { COPILOT_WRITERS, type Agent } from '../adapters/hooks/normalize.js'
 import { compileClaudeSandbox } from '../core/policy/compile.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
@@ -314,15 +314,15 @@ async function hooksCmd(argv: string[]): Promise<number> {
   const config = {
     version: 1,
     hooks: {
-      preToolUse: [{ ...cmd('pre'), matcher: 'bash|powershell|edit|create' }],
-      postToolUse: [{ ...cmd('post'), matcher: 'bash|powershell|edit|create' }],
-      postToolUseFailure: [{ ...cmd('post-failed'), matcher: 'bash|powershell|edit|create' }],
+      preToolUse: [{ ...cmd('pre'), matcher: COPILOT_WRITERS }],
+      postToolUse: [{ ...cmd('post'), matcher: COPILOT_WRITERS }],
+      postToolUseFailure: [{ ...cmd('post-failed'), matcher: COPILOT_WRITERS }],
       agentStop: [cmd('stop')],
     },
   }
   await mkdir(join(process.cwd(), '.github', 'hooks'), { recursive: true })
   await writeFile(COPILOT_HOOKS, JSON.stringify(config, null, 2) + '\n')
-  console.error(`envgit: wrote ${relative(process.cwd(), COPILOT_HOOKS)} — it names this machine's node and envgit paths, so keep it out of commits`)
+  console.error(`envgit: wrote ${relative(process.cwd(), COPILOT_HOOKS)} — it names this machine's node and envgit paths, so keep it out of commits. Copilot runs a repository's hooks only in a trusted folder (with -p: --trust-folder)`)
   return 0
 }
 

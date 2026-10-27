@@ -97,6 +97,10 @@ describe('agent hooks (e2e, needs `npm run build`)', () => {
     await hook(dir, 'copilot', 'post-failed', { toolName: 'create', toolArgs: { path: join(dir, 'c.txt') } })
     const last = (await steps()).at(-1)!
     expect(last).toMatchObject({ exitCode: 1, agent: { name: 'copilot', tool: 'create' } })
+    // apply_patch (Copilot 1.0.104's edit tool) names its files inside the patch text.
+    await writeFile(join(dir, 'd.txt'), 'd\n')
+    await hook(dir, 'copilot', 'post', { toolName: 'apply_patch', toolArgs: '*** Begin Patch\n*** Add File: d.txt\n+d\n*** End Patch\n' })
+    expect((await steps()).at(-1)!.action).toEqual({ type: 'fs', input: JSON.stringify([{ op: 'write', path: 'd.txt' }]) })
     expect((await run(process.execPath, [CLI, 'hooks', 'install', 'copilot'], { cwd: dir })).stderr).toMatch(/wrote \.github\/hooks\/envgit\.json/)
     const cfg = JSON.parse(await readFile(join(dir, '.github/hooks/envgit.json'), 'utf8'))
     expect(cfg.version).toBe(1)
