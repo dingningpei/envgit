@@ -86,7 +86,14 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 
 ### 3.4 Adapters (`src/adapters`)
 
-- `claude-code`, `codex`, `copilot`: translate policy to native config; expose envgit as a remote/self-hosted environment where the vendor protocol allows (Codex `exec-server --remote` first).
+- `claude-code`, `copilot`: translate policy to native config; expose envgit as a remote/self-hosted environment where the vendor protocol allows.
+- `codex` (`src/adapters/codex`, written against Codex 0.162.1, whose `codex exec-server` is still marked experimental): Codex sends every command and file operation of a turn to an *exec-server* — JSON-RPC: `process/start|read|write|signal|terminate` with `process/output|exited|closed` notifications, and `fs/*` — and envgit stands in as that server. `envgit codex [args]` runs Codex with `CODEX_EXEC_SERVER_URL` pointing at a loopback WebSocket on a random path (the URL is the only credential Codex sends for it), so `~/.codex` is not touched; `envgit codex-exec-server` serves the same over stdio for an `environments.toml` entry (`program = "envgit"`). Behind it, envgit runs a real `codex exec-server --listen stdio`:
+  - `process/start` is run by envgit's backend — srt's sandbox, envgit's policy and gate, not the sandbox Codex asks for — and each process is a step (exec, its argv, Codex's tool-call id). The step is recorded before `process/exited` goes back: Codex's next request may build on it. Output streams as it comes and stays buffered for `process/read`.
+  - `fs/writeFile|createDirectory|remove|copy` (apply_patch's path) are forwarded and recorded as one `fs` step per burst — closed by 150 ms of quiet or the next `process/start`.
+  - Everything else — metadata and reads (Codex walks up for `.git`, `AGENTS.md`, skills), `environmentConfig/read`, capability discovery, `http/request` — is forwarded unchanged. `http/request` is Codex fetching through the environment, so it does **not** pass envgit's gate.
+  - `initialize` answers with the real server's executor info, minus `fileWriteStreaming`, `sandboxedFileStreaming`, `networkProxyLaunch` and `shellSnapshotV2`, which envgit does not serve.
+  - Shell `irreversible` rules see the commands inside Codex's `zsh -lc '<script>'`, split on newlines, `;`, `&&`, `||` and `|` (a best effort; net rules enforce). `ask` rules deny: the protocol has no way to ask Codex's user, and Codex owns the terminal.
+  - Seen in a capture of a real `codex exec`: one non-PTY process per shell tool call; a real `codex exec` through `envgit codex` (apply_patch on two files, then commands) recorded exec, fs, exec. Tests replay the protocol with a scripted client, never OpenAI. Not covered: PTY sessions and `process/write` (the TUI's interactive commands get `stdinClosed`), concurrent commands' net effects (the gate is per process, so they are attributed to whichever ends first), and the vm backend.
 - `mcp`: expose the REPL as an MCP server so any client can use it without native support.
 
 ### 3.5 fs-level snapshots on srt (`src/core/snapshot/store.ts`)
@@ -301,7 +308,7 @@ normalized path (ambiguous spellings like `/a/../b` are refused). Checked with c
 2. **M1** — REPL with persistent state and capability injection, exposed as an MCP server. Demo ([`demo-m1.md`](demo-m1.md)): 1.6× fewer context tokens on a 48 KB task, 9.4× (3.8× cost) on a 380 KB task where per-capability tools hit Claude Code's result-size limit and got the answer wrong.
 3. **M2** — per-step snapshots; `envgit log`, `envgit fork <step>`, `envgit rewind <step>`. Done first on srt with fs-level snapshots (below), because Firecracker needs Linux + KVM; the Firecracker backend moves to M2.5.
    - **M2.5** — Firecracker backend (Linux + KVM): full memory + disk snapshots behind the same `log` / `fork` / `rewind`.
-4. **M3** — irreversible-action gating through the egress proxy (done on srt, §4); Codex self-hosted environment adapter.
+4. **M3** — irreversible-action gating through the egress proxy (done on srt, §4); Codex environment adapter (done on srt, §3.4).
 5. **M4** — Apple Virtualization backend; web UI timeline.
 
 ## 6. Prior art

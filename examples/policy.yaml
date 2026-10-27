@@ -13,8 +13,9 @@ capabilities:
 # Irreversible actions cross the snapshot boundary, so rewind cannot undo them. Each is gated:
 # action: ask (default) asks at the terminal or the MCP client, deny refuses, allow only marks the step.
 # Net rules see HTTPS requests because the proxy terminates TLS when any request rule exists.
-# Paths: `*` is one segment, `**` any. Shell rules match the command line envgit runs; a wrapper like
-# `sh -c 'git push'` gets past them, which is why the net rule is the one that enforces.
+# Paths: `*` is one segment, `**` any. Shell rules match the command line envgit runs, and the simple
+# commands of an `sh -c` script; quoting, subshells or variables get past them, which is why the net
+# rule is the one that enforces.
 irreversible:
   - net: { host: "github.com", method: POST, path: "/**/git-receive-pack" }   # git push over HTTPS
   - net: { host: "api.github.com", method: POST, path: "/repos/*/*/issues" }

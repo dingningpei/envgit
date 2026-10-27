@@ -67,13 +67,27 @@ export function judgeNet(policy: Policy, req: NetRequest): GateVerdict {
 }
 
 export function judgeShell(policy: Policy, argv: string[]): { action: IrreversibleAction; rule: string } | undefined {
-  const cmd = argv.join(' ')
+  const cmds = [argv.join(' '), ...scriptCommands(argv)]
   for (const rule of policy.irreversible ?? []) {
     if (!('shell' in rule)) continue
-    const hit = rule.shell.find(p => cmd === p || cmd.startsWith(p + ' '))
+    const hit = rule.shell.find(p => cmds.some(cmd => cmd === p || cmd.startsWith(p + ' ')))
     if (hit) return { action: rule.action ?? 'ask', rule: `shell: ${hit}` }
   }
   return undefined
+}
+
+/**
+ * The simple commands of `sh -c '<script>'` (any sh/bash/zsh/dash, `-lc` too), which is how agents
+ * such as Codex run everything. A best effort split on newlines, `;`, `&&`, `||` and `|`: quoting,
+ * subshells and variables still get past it, so net rules remain what enforces.
+ */
+function scriptCommands(argv: string[]): string[] {
+  const [sh, flag, script] = argv
+  if (argv.length !== 3 || !sh || !/(^|\/)(ba|z|da)?sh$/.test(sh) || !flag || !/^-[a-z]*c[a-z]*$/.test(flag) || !script) return []
+  return script
+    .split(/\n|;|&&|\|\||\|/)
+    .map(c => c.trim().replace(/\s+/g, ' '))
+    .filter(Boolean)
 }
 
 /** Whether the policy needs request-level inspection, and with it TLS termination. */

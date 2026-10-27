@@ -2,6 +2,7 @@
 import { access, copyFile, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runCodexWs, serveCodexStdio } from '../adapters/codex/serve.js'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
@@ -44,6 +45,9 @@ const help = `envgit — version control for agent execution environments
   envgit run <cmd...>    run a command in the sandbox, record a step
   envgit mcp [--tools]   serve the sandboxed REPL as an MCP server on stdio
                          (--tools: one MCP tool per capability instead of execute)
+  envgit codex [args...] run Codex with envgit as its environment: each command it runs
+                         is a step in the sandbox, each apply_patch a step (srt backend)
+  envgit codex-exec-server   the same, as a stdio exec-server for ~/.codex/environments.toml
   envgit log                     show the steps leading to the current state
   envgit rewind <step|base>      restore the workdir to a step (--force drops unrecorded edits)
   envgit fork <step|base> <dir>  materialize a step into a new directory with its own session
@@ -181,6 +185,33 @@ async function mcp(mode: 'repl' | 'tools'): Promise<number> {
   }
 }
 
+/** Codex's commands and file operations, through envgit (src/adapters/codex). */
+async function codexOptions() {
+  const policy = await requireInit()
+  if (policy.backend === 'vm') throw new Error('envgit codex: the vm backend is not supported yet; use backend: srt')
+  // Codex owns the terminal, and the exec-server protocol has no way to ask its user.
+  const gate = new Gate(policy, undefined, 'no way to ask from inside Codex')
+  const log = (line: string) => console.error(line)
+  return { workdir: process.cwd(), policy, gate, root: ROOT, snapshotting: snapshotting(policy), codexBin: process.env.ENVGIT_CODEX_BIN, log }
+}
+
+async function codex(argv: string[]): Promise<number> {
+  const o = await codexOptions()
+  // ENVGIT_CODEX_AGENT (a JSON argv) stands in for the codex binary as the agent, for tests.
+  const agent = process.env.ENVGIT_CODEX_AGENT ? (JSON.parse(process.env.ENVGIT_CODEX_AGENT) as string[]) : [o.codexBin ?? 'codex']
+  const code = await runCodexWs(o, [...agent, ...argv])
+  const session = await openSession(ROOT, 'srt')
+  console.error(`envgit: Codex ran in session ${session.meta.id}; \`envgit log\` shows its steps`)
+  return code
+}
+
+async function codexExecServer(): Promise<number> {
+  // stdout is the transport.
+  console.log = console.error
+  await serveCodexStdio(await codexOptions())
+  return 0
+}
+
 function parseRef(arg: string | undefined): StepRef {
   if (arg === 'base') return 'base'
   if (arg && /^\d+$/.test(arg)) return Number(arg)
@@ -251,7 +282,12 @@ async function log(): Promise<number> {
   console.log(`session ${session.meta.id}${from ? ` (forked from ${from.session} step ${from.step})` : ''}`)
   console.log(`  base  ${short(session.meta.base)}`)
   for (const st of chain) {
-    const input = st.action.type === 'exec' ? (JSON.parse(st.action.input) as string[]).join(' ') : st.action.input.replace(/\s+/g, ' ')
+    const input =
+      st.action.type === 'exec'
+        ? (JSON.parse(st.action.input) as string[]).join(' ').replace(/\s+/g, ' ')
+        : st.action.type === 'fs'
+          ? (JSON.parse(st.action.input) as { op: string; path: string }[]).map(o => `${o.op} ${o.path}`).join(', ')
+          : st.action.input.replace(/\s+/g, ' ')
     const denied = st.effects.filter(e => (e.kind === 'policy' ? RELEVANT_DENIAL.test(e.reason) : 'denied' in e && e.denied)).length
     const cols = [
       String(st.index).padStart(5),
@@ -615,6 +651,12 @@ try {
       break
     case 'vm':
       code = await vmCmd(args)
+      break
+    case 'codex':
+      code = await codex(args)
+      break
+    case 'codex-exec-server':
+      code = await codexExecServer()
       break
     case 'mcp':
       if (args[0] === '--worker') {

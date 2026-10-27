@@ -9,11 +9,16 @@ export interface Step {
   index: number
   startedAt: string
   endedAt: string
-  /** `checkpoint`: envgit saved the guest's state itself (e.g. before restarting the VM), no command ran. */
-  action: { type: 'exec' | 'repl' | 'push' | 'checkpoint'; input: string }
+  /**
+   * `checkpoint`: envgit saved the guest's state itself (e.g. before restarting the VM), no command ran.
+   * `fs`: file operations an agent made through envgit (Codex's apply_patch); input is `[{op, path}]`.
+   */
+  action: { type: 'exec' | 'repl' | 'push' | 'checkpoint' | 'fs'; input: string }
   exitCode: number
   effects: Effect[]
   irreversible?: { reason: string }
+  /** The Codex tool call that ran this step, when it came through `envgit codex`. */
+  codex?: { toolCallId: string }
   snapshot?: SnapshotId
   parent?: number
 }

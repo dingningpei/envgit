@@ -84,6 +84,10 @@ describe('Gate', () => {
   it('gates shell rules before a command starts', async () => {
     expect(judgeShell(policy, ['git', 'push', 'origin'])).toMatchObject({ action: 'ask' })
     expect(judgeShell(policy, ['git', 'pushx'])).toBeUndefined()
+    // Agents wrap every command in a shell; the script's own commands are judged too.
+    expect(judgeShell(policy, ['/bin/zsh', '-lc', 'git add -A\ngit commit -m x && git  push origin'])).toMatchObject({ rule: 'shell: git push' })
+    expect(judgeShell(policy, ['bash', '-c', 'echo git push'])).toBeUndefined()
+    expect(judgeShell(policy, ['python3', '-c', 'git push'])).toBeUndefined()
     expect((await new Gate(policy).checkShell(['git', 'push'])).refused).toMatch(/needs approval/)
     expect(await new Gate(policy, async () => true, 't').checkShell(['git', 'push'])).toEqual({ irreversible: 'shell: git push' })
     expect(await new Gate(policy).checkShell(['ls'])).toEqual({})
