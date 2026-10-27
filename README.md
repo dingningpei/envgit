@@ -69,7 +69,7 @@ envgit rewind 0          # back to just after step 0
 - **Claude Code** gets envgit's hooks for that run only, and a sandbox configuration compiled from your policy. `~/.claude` is not touched.
 - **Codex** runs its commands through envgit itself. envgit implements Codex's exec-server protocol, so commands run in envgit's sandbox or VM and go through its policy. `~/.codex` is not touched.
 - **Copilot CLI** has no per-run hooks, so `hooks install` writes `.github/hooks/envgit.json`. It contains this machine's paths; keep it out of commits.
-- **In every case**, an irreversible shell command that the policy denies is refused before it runs. With `action: ask`, the agent's own approval prompt asks you.
+- **Under Codex and `envgit run`**, irreversible actions are stopped at the HTTPS request, in the proxy. **Under Claude Code and Copilot CLI** only the shell rules apply today, and those match command lines, which a variable or a subshell gets past; there envgit records, and refuses the obvious cases, but does not yet enforce. Closing this is the first item of the next milestone.
 
 The MCP server exposes one tool, `execute`, which runs JavaScript in a persistent REPL inside the sandbox. The capabilities your policy grants (`fs`, `http`, `github: [listIssues, …]`) appear in it as async functions. Intermediate results stay in the REPL instead of the model's context: in [our measurement](docs/demo-m1.md) that took 1.6× fewer tokens than one tool per capability on a small task, and 9.4× fewer on a large one.
 
@@ -144,10 +144,13 @@ What works today:
 - the Codex, Claude Code and Copilot CLI integrations, checked in real sessions;
 - the timeline UI.
 
-Known gaps:
+Known gaps (see [design §7](docs/design.md) for the full review and [§5](docs/design.md) for what is next):
 - The VM backend is arm64 only; x86_64 is not built yet.
 - The Codex integration relies on `codex exec-server`, which Codex marks as experimental. It was written against Codex 0.162.1.
-- Under Claude Code and Copilot CLI, the agent runs its own tools. envgit can judge shell command lines there, but not individual HTTP requests.
+- Under Claude Code and Copilot CLI, the agent runs its own tools. envgit can judge shell command lines there, but not individual HTTP requests — so there it records rather than enforces.
+- `envgit run` on srt does not yet record which files a step changed; the Claude Code and Copilot hooks do.
+- The REPL's capabilities are built in (`fs`, `http`, two GitHub calls); a generic MCP-server bridge is not implemented yet.
+- The VM backend on macOS is nested (a Firecracker VM inside a Virtualization-framework VM), which makes a warm step ≈ 1 s; it is for trying memory-level rewind. The intended production shape is Firecracker on a Linux host.
 - On Linux, srt hides read-denied directories instead of refusing reads, so those denials don't show up in the log.
 
 ## License

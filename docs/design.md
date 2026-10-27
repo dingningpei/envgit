@@ -357,7 +357,31 @@ normalized path (ambiguous spellings like `/a/../b` are refused). Checked with c
 4. **M3** — irreversible-action gating through the egress proxy (done on srt, §4); Codex environment adapter, Claude Code and Copilot CLI through hooks (§3.4).
 5. **M4** — web UI timeline (`envgit ui`, §3.7). The Apple Virtualization backend it also listed became the vm backend's L1 on macOS (§3.6) rather than a backend of its own.
 
-## 6. Prior art
+6. **M5** — close the enforcement gap and generalize the REPL (from the 2026-10-27 review, §7).
+   - **One enforcement level for every agent.** `envgit claude` runs the whole `claude` process under envgit's srt with the gate (sandbox-runtime supports wrapping a process: its Bash, hooks and MCP servers all go through the proxy), with Claude Code's own sandbox off to avoid nesting; Codex's `http/request` is forwarded through the proxy instead of around the gate; `envgit run` on srt records fs effects by diffing the step's snapshot against its parent, as the hooks already do. Acceptance: with one policy, a `git push` to GitHub from Claude Code, Codex and `envgit run` is each stopped at the HTTPS request, not by command-line matching.
+   - **Generic MCP → REPL bridge.** Any MCP server's tools become typed async functions (`await <server>.<tool>(args)`), declarations generated from their JSON Schema; the hardcoded `github` capability goes away. Acceptance: the GitHub MCP server connected, and the M1 demo rerun against it (tools vs. `execute`), not against envgit's own tools.
+   - **Keep large results in the sandbox by default.** The M1 demo showed the model printing raw data to check its own code, giving back the saving. Three changes: `execute` returns a large result as a handle (`$1: Issue[] (200)`) rather than serializing it, like Jupyter's `Out[n]`; output over a threshold is truncated in the REPL with head, tail and a line saying how to look at a slice; `sample()`, `assert()` and `schema()` are injected so the model can spot-check instead of reading everything. Rerun the demo afterwards to see whether the M1 ratio was the method's ceiling or the model's floor.
+   - **CI, x86_64, release.** A GitHub Actions workflow running the Linux srt suite (it passes on Linux today); x86_64 pins for Firecracker, kernel, image and Node; `npm publish` of 0.1.0; a default `policy.yaml` that ships rules for the common irreversible commands (`gh pr create`, `gh release`, `twine upload`, `docker push`, `aws`/`gcloud` writes), so nobody has to know `git-receive-pack`.
+7. **M6** — GUI agents: the VM gets a display (Xvfb, a window manager, `xdotool`/`ydotool`, AT-SPI, VNC/WebRTC), GUI actions are steps, and clicks are resolved through the accessibility tree before injection so `irreversible.gui` rules can gate a Send / Pay / Confirm. Not before M5 ships.
+
+## 7. Review, 2026-10-27
+
+After M0–M4. Verified on Linux: `npm ci`, build, the full srt suite (77 tests, TLS-terminating gate included), the README quick start by hand, `.envgit` read-only inside the sandbox. The VM backend was not run (needs the Mac build).
+
+What holds: the layering (srt is the boundary, `node:vm` only persists, the gate sits on srt's `filterRequest`); the Codex adapter as a real exec-server rather than hooks, which is why Codex alone gets request-level gating; the nested-VM costs being measured and answered with the prebuilt base; the M1 demo reporting its own unfavourable runs.
+
+What does not, in priority order:
+1. `envgit run` on srt records no fs effects (a `sed -i` step shows `effects: []`); only the hooks path diffs snapshots.
+2. Under Claude Code and Copilot there is recording but no enforcement: only shell rules apply there, and `g=git; $g push` gets past them. The README's "in every case … refused before it runs" overstates this.
+3. The REPL's capabilities are hardcoded (`fs`, `http`, two GitHub calls); the MCP-tools-as-functions design is not implemented, so the M1 demo compares envgit's own tools with themselves.
+4. Codex's `http/request` bypasses the gate.
+5. The nested VM on macOS is a demo tier (a warm step ≈ 1–1.5 s against tens of ms on srt); the production shape is bare Firecracker on Linux, and x86_64 is missing. The nested fault cost is hardware, not something to optimize further.
+6. No CI; `lint` script without eslint.
+7. Default policy needs a stock set of irreversible rules; generated files with machine paths (`demo/results`, `.github/hooks/envgit.json`) must stay out of commits.
+
+M5 above is the answer to 1–4 and 6–7; M6 is where GUI work starts.
+
+## 8. Prior art
 
 - anthropics/sandbox-runtime — OS-primitive sandbox + proxy, credential masking.
 - NVIDIA/OpenShell — container/microVM runtime with gateway, L7 egress policy.
