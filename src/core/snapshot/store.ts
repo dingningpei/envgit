@@ -165,6 +165,12 @@ export class SnapshotStore {
     return join(this.objects(), hash)
   }
 
+  /** A file's contents as stored, by its manifest hash. */
+  async readBlob(hash: string): Promise<Buffer> {
+    if (!/^[0-9a-f]+$/.test(hash)) throw new Error(`not a blob hash: ${hash}`)
+    return readFile(this.blob(hash))
+  }
+
   private async putBlob(abs: string): Promise<string> {
     const hash = await hashFile(abs)
     const dst = this.blob(hash)

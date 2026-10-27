@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process'
 import { access, copyFile, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runCodexWs, serveCodexStdio } from '../adapters/codex/serve.js'
 import { SrtRunner, VmRunner, type Runner } from '../adapters/codex/runners.js'
 import { serveMcp } from '../adapters/mcp/server.js'
+import { serveUi } from '../ui/server.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
 import { recordVmStep, reportMirror, withEgress } from '../core/env/vm-step.js'
@@ -50,6 +52,8 @@ const help = `envgit — version control for agent execution environments
                          is a step in the sandbox (srt or vm), each apply_patch a step
   envgit codex-exec-server   the same, as a stdio exec-server for ~/.codex/environments.toml
   envgit log                     show the steps leading to the current state
+  envgit ui [--port N] [--open]  the session timeline in a browser: steps, effects, diffs,
+                                 rewind and fork (loopback only, a token in the URL)
   envgit rewind <step|base>      restore the workdir to a step (--force drops unrecorded edits)
   envgit fork <step|base> <dir>  materialize a step into a new directory with its own session
   envgit session [new]           print the current session, or start a new one
@@ -275,6 +279,19 @@ async function recoverRestore(policy: Policy): Promise<void> {
   }
   await restoreTo(session, snapshotting(policy), m.target, m.snapshot)
   console.error(`envgit: finished an interrupted rewind to ${m.target === 'base' ? 'base' : `step ${m.target}`}`)
+}
+
+async function ui(argv: string[]): Promise<number> {
+  await requireInit()
+  const p = argv.indexOf('--port')
+  const port = p >= 0 ? Number(argv[p + 1]) : 0
+  if (!Number.isInteger(port) || port < 0) throw new Error('usage: envgit ui [--port N] [--open]')
+  const server = await serveUi({ workdir: process.cwd(), root: ROOT, cli: fileURLToPath(import.meta.url), port })
+  console.error(`envgit: timeline at ${server.url} (Ctrl-C to stop)`)
+  if (argv.includes('--open')) spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [server.url], { stdio: 'ignore', detached: true }).on('error', () => {}).unref()
+  await new Promise<void>(r => process.once('SIGINT', r).once('SIGTERM', r))
+  await server.close()
+  return 0
 }
 
 async function log(): Promise<number> {
@@ -657,6 +674,9 @@ try {
       break
     case 'log':
       code = await log()
+      break
+    case 'ui':
+      code = await ui(args)
       break
     case 'rewind':
       code = await rewind(args)

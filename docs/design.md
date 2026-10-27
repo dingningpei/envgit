@@ -270,6 +270,26 @@ sparse version, rebuilt from the packed copy);
   again, so even a warm `envgit run node -e 1` takes ≈ 1–1.5 s end to end.
 - **Not yet:** a cap on the disk the snapshots take besides `envgit gc`.
 
+### 3.7 Timeline UI (`src/ui`)
+
+`envgit ui [--port N] [--open]` serves the session timeline to a browser: a loopback HTTP server
+and one self-contained page (no external resources) that polls every 1.5 s, so a running agent's
+steps appear as they are recorded.
+- **What it shows:** the session's steps as a tree (from each step's `parent`), the current branch
+  highlighted and steps off it dimmed, HEAD marked; per step its command, exit code, timing,
+  snapshot, Codex tool-call id, irreversible marker, and effects grouped by kind (files written and
+  deleted, requests, policy denials — srt's sysctl / mach lookups folded away as noise, as `log`
+  does). On srt it diffs the step's snapshot against its parent's (unified text diffs; binary, files
+  over 1 MB and over 3000 lines are named, not diffed). vm snapshots are memory and disk images, so
+  there the step's fs effects from the mirror sync stand in. Other sessions can be browsed read-only.
+- **Rewind and fork** run the CLI itself (`envgit rewind|fork`), so the busy lock, the drift check
+  and the vm boot behave as at a terminal; the CLI's message is shown as is. A rewind refused for
+  edits made outside envgit offers `--force` as a second, separately labelled click.
+- **Access:** the page can rewind, so the server binds 127.0.0.1, its URL carries a random token
+  that every API call needs (POSTs in a header, so a plain link cannot mutate), and requests must
+  name this host (no DNS rebinding). The step log is read leniently: a step still being appended is
+  left for the next poll.
+
 ## 4. Irreversibility
 
 Effects are classified at policy-compile time and confirmed at runtime by the proxy:
@@ -313,7 +333,7 @@ normalized path (ambiguous spellings like `/a/../b` are refused). Checked with c
 3. **M2** — per-step snapshots; `envgit log`, `envgit fork <step>`, `envgit rewind <step>`. Done first on srt with fs-level snapshots (below), because Firecracker needs Linux + KVM; the Firecracker backend moves to M2.5.
    - **M2.5** — Firecracker backend (Linux + KVM): full memory + disk snapshots behind the same `log` / `fork` / `rewind`.
 4. **M3** — irreversible-action gating through the egress proxy (done on srt, §4); Codex environment adapter (§3.4).
-5. **M4** — Apple Virtualization backend; web UI timeline.
+5. **M4** — web UI timeline (`envgit ui`, §3.7). The Apple Virtualization backend it also listed became the vm backend's L1 on macOS (§3.6) rather than a backend of its own.
 
 ## 6. Prior art
 
