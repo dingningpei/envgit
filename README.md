@@ -1,56 +1,155 @@
 # envgit
 
-**Version control for agent execution environments.**
+**Version control for the environment your coding agent works in.**
 
-Coding agents (Claude Code, Codex, Copilot CLI, …) run for hours, execute thousands of commands, and leave you with a diff and a chat log. envgit records what actually happened, lets you fork or rewind the environment at any step, and gates the actions that cannot be undone.
+Coding agents such as Claude Code, Codex and Copilot CLI run for hours and execute thousands of commands, and afterwards you have a diff and a chat log. envgit records every step the agent takes in a sandbox — the command, the files it changed, the hosts it reached, what the policy denied — and snapshots the environment after each one. You can rewind to any step, fork from it, and stop the actions a rewind could never undo, such as a `git push` or a POST to a production API, before they go out.
 
-```
-git            → versions file content
-envgit         → versions environment state + the actions that produced it
+```console
+$ envgit init
+initialized ~/myproject/.envgit
+$ envgit run sh -c "sed -i '' s/hi/hello/ app.py"
+envgit: step 0 recorded in session 20261027T200311-619e07
+$ envgit run python3 app.py
+hello
+envgit: step 1 recorded in session 20261027T200311-619e07
+$ envgit run curl -sS https://example.com
+curl: (56) CONNECT tunnel failed, response 403
+envgit: denied deny network-outbound example.com:443 (host is not on the allow list)
+envgit: step 2 recorded in session 20261027T200311-619e07
+$ envgit log
+session 20261027T200311-619e07
+  base  a49adcd7
+    0  20:03:11  exec  exit 0   4e49b8f3  sh -c sed -i '' s/hi/hello/ app.py
+    1  20:03:11  exec  exit 0   4e49b8f3  python3 app.py
+    2  20:03:11  exec  exit 56  4e49b8f3  curl -sS https://example.com                                  1 denied
+head: 2
+$ envgit rewind base
+envgit: rewound to base (3 step(s) undone)
 ```
 
 | git | envgit |
 |---|---|
-| commit | snapshot of the whole environment after a step (fs + memory + processes) |
-| branch | fork the environment at any step and run two approaches in parallel |
-| log | what the agent did: commands, files read/written, network calls, policy denials, tokens |
-| diff | file changes **and** action sequence between two snapshots |
-| reset | rewind the environment to any earlier step |
-| — | **egress policy**: side effects outside the sandbox (push, email, paid APIs) are gated or flagged as irreversible |
+| commit | a snapshot after every step: the workdir, or with the VM backend the whole machine, memory and running processes included |
+| log | what each step did: command, exit code, files written and deleted, requests made, policy denials, irreversible actions |
+| reset | `envgit rewind <step>` puts the environment back; the abandoned steps stay in the log as a branch |
+| branch | `envgit fork <step> <dir>` materializes any step into a new directory with its own session |
+| diff | the timeline UI shows what each step changed against its parent |
+| — | **irreversible actions** (a push, a publish, a payment) are refused, or need a person's yes, before they leave the sandbox |
 
-## Why
+Sandboxes already isolate well: Seatbelt, bubblewrap, Firecracker. envgit adds what they don't: a record of what the agent did, the reason each action was allowed, and a way back.
 
-Isolation is infrastructure — bubblewrap, Seatbelt, Firecracker, gVisor already do it well. What nobody provides is **governance**: knowing what the agent did, why it was allowed, and being able to go back. envgit sits on top of existing sandboxes and adds that layer.
+## Quick start
 
-## Three layers
+envgit is not on npm yet; build it from source. It needs Node 22 or newer, and macOS or Linux. On Linux the sandbox also needs `bubblewrap`, `socat` and `ripgrep`.
 
-1. **Environment backend** — pluggable: local OS primitives (via [`@anthropic-ai/sandbox-runtime`](https://github.com/anthropics/sandbox-runtime)), containers, microVMs with snapshots (Firecracker, Apple Virtualization).
-2. **Policy** — one declarative file that drives filesystem / network / capability rules across all agents, and marks which actions are irreversible.
-3. **REPL** — a persistent, capability-scoped code execution environment (Code Mode style) where MCP tools, CLIs and HTTP are exposed as typed functions and intermediate results never enter the model context.
+```bash
+git clone https://github.com/dingningpei/envgit.git
+cd envgit && npm install && npm run build && npm link   # puts `envgit` on your PATH
+```
+
+Then, in a project:
+
+```bash
+envgit init              # creates .envgit/ with a default policy (.envgit/policy.yaml)
+envgit run npm test      # runs in the sandbox and records a step
+envgit log               # the steps so far
+envgit ui --open         # the timeline in a browser
+envgit rewind 0          # back to just after step 0
+```
+
+## Use it with your agent
+
+| Agent | How | What becomes a step |
+|---|---|---|
+| **Claude Code** | `envgit claude [claude args]` | every tool call that can change files (Bash, Edit, Write, …), plus a checkpoint at the end of each turn |
+| **Codex** | `envgit codex [codex args]` | every command Codex runs (in envgit's sandbox) and every `apply_patch` |
+| **Copilot CLI** | `envgit hooks install copilot`, then run `copilot` in that folder (trust it; with `-p`, pass `--trust-folder`) | every shell command and file edit, plus a checkpoint at the end of each turn |
+| **Any MCP client** | `claude mcp add envgit -- envgit mcp` (or your client's equivalent) | every call to its `execute` tool: a sandboxed JavaScript REPL |
+
+- **Claude Code** gets envgit's hooks for that run only, and a sandbox configuration compiled from your policy. `~/.claude` is not touched.
+- **Codex** runs its commands through envgit itself. envgit implements Codex's exec-server protocol, so commands run in envgit's sandbox or VM and go through its policy. `~/.codex` is not touched.
+- **Copilot CLI** has no per-run hooks, so `hooks install` writes `.github/hooks/envgit.json`. It contains this machine's paths; keep it out of commits.
+- **In every case**, an irreversible shell command that the policy denies is refused before it runs. With `action: ask`, the agent's own approval prompt asks you.
+
+The MCP server exposes one tool, `execute`, which runs JavaScript in a persistent REPL inside the sandbox. The capabilities your policy grants (`fs`, `http`, `github: [listIssues, …]`) appear in it as async functions. Intermediate results stay in the REPL instead of the model's context: in [our measurement](docs/demo-m1.md) that took 1.6× fewer tokens than one tool per capability on a small task, and 9.4× fewer on a large one.
+
+## Policy
+
+One file, `.envgit/policy.yaml`, drives the sandbox for every agent:
+
+```yaml
+filesystem:
+  read:  { deny: ["~/.ssh", "~/.aws", "**/.env"], allow: ["."] }
+  write: { allow: [".", "/tmp"], deny: [".env"] }
+network:
+  allow: ["api.github.com:443", "registry.npmjs.org"]
+  l7:
+    api.github.com: { methods: [GET] }          # everything else to this host is refused
+irreversible:                                   # what rewind cannot undo
+  - net: { host: "github.com", method: POST, path: "/**/git-receive-pack" }   # git push over HTTPS
+  - net: { host: "registry.npmjs.org", method: PUT }                          # npm publish
+  - shell: ["git push", "npm publish"]
+    action: deny                                # or ask (the default), or allow (just mark the step)
+snapshot:
+  maxBytes: 10G                                 # drop the oldest rewind points to stay under this
+```
+
+- **Network rules:** when the policy has request-level rules, the sandbox proxy terminates TLS so it can judge each HTTP(S) request by method and path.
+- **Shell rules:** these match the command line, including the commands inside an `sh -c` script. They are a best effort, so the network rules are what actually enforces.
+- **Recording decisions:** every decision is recorded on the step, and the log and the UI mark the steps that reached outside.
+
+See [`examples/policy.yaml`](examples/policy.yaml) and [design §3.2, §4](docs/design.md).
+
+## Two backends
+
+| | `srt` (default) | `vm` |
+|---|---|---|
+| Isolation | OS sandbox via [sandbox-runtime](https://github.com/anthropics/sandbox-runtime): Seatbelt on macOS, bubblewrap on Linux | a Firecracker microVM running Ubuntu 24.04 with git, Python, Node 24 and ripgrep |
+| A snapshot holds | the workdir's files (content-addressed and incremental) | the whole machine: disk, memory and running processes |
+| Rewind brings back | files | files, plus the processes that were running, with their state |
+| Runs on | macOS, Linux | Apple-silicon Macs (M3 or later, macOS 15+), nested in a Virtualization-framework VM; arm64 Linux with KVM (plus `squashfs-tools`) |
+
+To use the VM, set `backend: vm` in the policy, run `scripts/vm/build.sh` once, then run `envgit vm up`. The build script downloads pinned, checksummed kernels, Firecracker and images into `~/.cache/envgit/vm`, and prebuilds a warm base snapshot. After that, `vm up` takes about 2 s and a step about 0.4 s.
+
+On the VM backend:
+- **Host workdir:** it becomes a read-only mirror of the guest's `/work`, synced after every step. `envgit vm push <path>` sends your own edits in, as a step.
+- **Snapshots:** they live on the host, so `envgit vm down` loses nothing (it checkpoints first), and `vm up` resumes with the same processes running.
+- **Network:** the guest reaches it only through the host's proxy, only while a step runs, and under the same policy.
+
+## Timeline
+
+`envgit ui` serves a page on 127.0.0.1, with a random token in the URL:
+- the session's steps as a tree, with the current branch highlighted;
+- each step's command, effects, denials and irreversible marks, and, on srt, a diff of the files it changed;
+- buttons to rewind or fork from any step.
+
+The page refreshes as new steps are recorded, so you can watch an agent work.
+
+## How it works
+
+- **Each step** is one command, one REPL call, or one agent tool call. Steps are appended to `.envgit/sessions/<id>/steps.jsonl`, each pointing at its parent, so rewinding and then continuing creates a branch instead of losing history.
+- **Snapshots on srt** are content-addressed manifests plus deduplicated blobs.
+- **Snapshots on vm** are a full base snapshot plus Firecracker memory diffs along the parent chain. With `snapshot.maxBytes`, envgit drops the oldest rewind points first; on the VM it folds a dropped diff into its children.
+- **Irreversible actions** are judged in two places: the egress proxy (srt's proxy, or the VM's vsock tunnel into it) and the agent hooks.
+
+[`docs/design.md`](docs/design.md) has the full design. [`docs/spike-nested-firecracker.md`](docs/spike-nested-firecracker.md) covers how Firecracker runs nested on a Mac.
 
 ## Status
 
-Early. See [`docs/design.md`](docs/design.md) for the plan.
+envgit is early and experimental: interfaces and on-disk formats may change.
 
-- **M0** — `envgit init`, `envgit run <cmd...>`: runs a command under [`sandbox-runtime`](https://github.com/anthropics/sandbox-runtime) with the policy in `.envgit/policy.yaml` and appends a step to `.envgit/sessions/<id>/steps.jsonl`.
-- **M1** — `envgit mcp`: a persistent JavaScript REPL running inside the sandbox, exposed as one MCP tool, `execute`. Capabilities listed under `capabilities:` in the policy (`fs`, `http`, `github: [listIssues, getIssue]`) are injected as async functions; each call is logged as a step with the files and hosts it touched or was denied. Measured against one-tool-per-capability: 1.6× fewer context tokens on a small task, 9.4× on a large one ([demo](docs/demo-m1.md)).
+What works today:
+- the srt and VM backends, with rewind, fork, gc and the snapshot size cap;
+- the MCP REPL;
+- the Codex, Claude Code and Copilot CLI integrations, checked in real sessions;
+- the timeline UI.
 
-- **M2 (srt)** — every step snapshots the workdir (content-addressed, incremental). `envgit log` shows the chain, `envgit rewind <step|base>` restores it in place and keeps the abandoned steps in the log, `envgit fork <step> <dir>` materializes a step into a new directory, `envgit session new` starts a fresh session and `envgit gc` drops snapshots nothing refers to. A running `envgit mcp` notices a rewind and resets its REPL. Files only, not memory or processes.
-
-- **M2.5 (vm backend, macOS and Linux arm64)** — `backend: vm` in the policy runs commands inside a Firecracker guest — on macOS nested in a Virtualization-framework microVM, on Linux directly on the host's KVM — and every step is a Firecracker diff snapshot: `envgit rewind` brings back files **and running processes**. `envgit vm up` boots it (and imports the workdir), the host workdir becomes a read-only mirror synced after every step (host edits that were not pushed are kept and reported, never overwritten), and `envgit vm push <path>` sends host edits in as a step. Snapshots are stored on the host in `.envgit/vm/snaps`, so `envgit vm down` loses nothing (it checkpoints the guest first): `vm up` resumes the session with its processes, `rewind` works while the VM is down, and `envgit fork` works on vm sessions too. L2 runs the Ubuntu 24.04 server image with git, python3, Node 24 and ripgrep, and `envgit mcp` works on this backend too — with the REPL worker inside the VM, so `rewind` brings back its variables, not just files. L2 reaches the network only through a vsock tunnel to the host, where the same srt proxy and irreversible-action gate as on srt judge each request — and only while a step runs. Needs an M3+ Mac on macOS 15+, or an arm64 Linux host with KVM plus bubblewrap, socat, ripgrep and squashfs-tools (x86_64 is not built yet), and `scripts/vm/build.sh` (downloads pinned kernels/Firecracker into `~/.cache/envgit/vm`, and prebuilds a warmed-up base snapshot that new sessions restore instead of booting: `vm up` ≈ 2 s, first node ≈ 1 s). See [design §3.6](docs/design.md) and the [spike](docs/spike-nested-firecracker.md).
-
-- **M3 (gating)** — irreversible actions are gated, not just logged. With request rules in the policy, the sandbox proxy terminates TLS and judges every HTTP(S) request: `network.l7` denies what it does not list, and an `irreversible` rule (`git push` over HTTPS, `npm publish`, a POST to an API) either asks — at the terminal for `envgit run`, through MCP elicitation for `envgit mcp` — or is denied / allowed outright per its `action`. With no one to ask, `ask` denies. The decision is recorded on the step, and `log` / `rewind` show which steps reached outside. See [design §4](docs/design.md).
-- **M3 (Codex)** — `envgit codex [args]` runs Codex with envgit as its environment: every command Codex runs goes through envgit's sandbox, policy and gate and is a step, every apply_patch a step, so `envgit log` / `rewind` / `fork` cover a Codex session like any other. It speaks Codex's exec-server protocol (Codex 0.162.1; experimental upstream) on a loopback WebSocket and leaves `~/.codex` alone; `envgit codex-exec-server` is the stdio form for `environments.toml`. Works on both backends: on `backend: vm` Codex's commands run in the VM, so `rewind` brings back their processes too. See [design §3.4](docs/design.md).
-- **M3 (Claude Code, Copilot CLI)** — `envgit claude [args]` runs Claude Code with envgit's hooks (for that run only) and a sandbox compiled from the policy: every tool call that can change files becomes a step with the files it changed, a turn's end checkpoints what background processes wrote, and irreversible shell commands are refused or handed to Claude Code's own approval prompt. `envgit hooks install copilot` does the same for Copilot CLI (run it with `--trust-folder` in `-p` mode, or it ignores repository hooks). Checked in real Claude Code and Copilot sessions. srt backend. See [design §3.4](docs/design.md).
-- **M4 (timeline)** — `envgit ui` opens the session in a browser: the step tree with the current branch highlighted, each step's command, exit code, effects, denials and irreversible marks, and on srt a diff of what it changed; rewind or fork from any step (it runs the CLI, so the same checks apply). It refreshes as steps land, so you can watch Codex or an MCP client work. Loopback only, with a token in the URL. See [design §3.7](docs/design.md).
-- **Snapshot size cap** — `snapshot.maxBytes: 10G` in the policy keeps snapshots under a size by dropping the oldest rewind points (older sessions, abandoned branches, then the start of the current branch; never base, head or the last 10 steps). Dropped steps stay in the log, marked `pruned`. On vm, a dropped step's memory diff is folded into the steps that build on it. See [design §3.5](docs/design.md).
-
-```bash
-npm install && npm run build
-cd your-project && node /path/to/envgit/dist/cli/index.js init
-claude mcp add envgit -- node /path/to/envgit/dist/cli/index.js mcp
-```
+Known gaps:
+- The VM backend is arm64 only; x86_64 is not built yet.
+- The Codex integration relies on `codex exec-server`, which Codex marks as experimental. It was written against Codex 0.162.1.
+- Under Claude Code and Copilot CLI, the agent runs its own tools. envgit can judge shell command lines there, but not individual HTTP requests.
+- On Linux, srt hides read-denied directories instead of refusing reads, so those denials don't show up in the log.
 
 ## License
 
-Apache-2.0
+[Apache-2.0](LICENSE)

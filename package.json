@@ -3,6 +3,23 @@
   "version": "0.0.1",
   "description": "Version control for agent execution environments",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dingningpei/envgit.git"
+  },
+  "homepage": "https://github.com/dingningpei/envgit#readme",
+  "bugs": {
+    "url": "https://github.com/dingningpei/envgit/issues"
+  },
+  "keywords": [
+    "agents",
+    "sandbox",
+    "snapshots",
+    "firecracker",
+    "mcp",
+    "codex",
+    "claude-code"
+  ],
   "type": "module",
   "bin": {
     "envgit": "./dist/cli/index.js"

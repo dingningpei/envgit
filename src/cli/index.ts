@@ -71,8 +71,8 @@ const help = `envgit — version control for agent execution environments
   envgit vm down|status          stop the VM (snapshots stay on disk) / show it
   envgit vm push <path...>       copy host edits into the VM, recorded as a step
 
-Snapshots are fs-level on srt: files only, not memory or processes. Restart
-\`envgit mcp\` after a rewind.
+Snapshots are fs-level on srt: files only, not memory or processes (backend: vm
+keeps those too). A running \`envgit mcp\` resets its REPL after a rewind.
 
 Irreversible actions (policy \`irreversible:\`) are gated: HTTP requests through the
 sandbox proxy (TLS-terminated when the policy has request rules) and matching
@@ -472,7 +472,7 @@ async function rewind(args: string[]): Promise<number> {
     console.error(red(`envgit: step ${s.index} cannot be undone (${s.irreversible!.reason}): ${s.action.input}`))
   }
   await restoreTo(session, snap, target, targetId)
-  console.error(`envgit: rewound to ${target === 'base' ? 'base' : `step ${target}`} (${undone.length} step(s) undone)${session.meta.backend === 'vm' ? '' : '; restart envgit mcp if it is running'}`)
+  console.error(`envgit: rewound to ${target === 'base' ? 'base' : `step ${target}`} (${undone.length} step(s) undone)`)
   return 0
 }
 
