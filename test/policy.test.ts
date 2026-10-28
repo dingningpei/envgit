@@ -13,7 +13,11 @@ describe('compileSrt', () => {
   it('maps the example policy onto srt settings', async () => {
     const policy = await loadPolicy(fileURLToPath(new URL('../examples/policy.yaml', import.meta.url)))
     expect(compileSrt(policy)).toEqual({
-      network: { allowedDomains: ['api.github.com:443', 'registry.npmjs.org'], deniedDomains: [] },
+      network: {
+        allowedDomains: ['api.github.com:443', 'registry.npmjs.org'],
+        deniedDomains: ['*:22'],
+        deniedDomainReasons: { '*:22': expect.stringMatching(/"git push over SSH".*use an https:\/\/ remote/) },
+      },
       filesystem: {
         denyRead: ['~/.ssh', '~/.aws', '**/.env'],
         allowRead: ['.'],
@@ -96,13 +100,15 @@ describe('the default preset', () => {
       ['DELETE', 'api.github.com', '/repos/a/b', 'GitHub API write'],
       ['PATCH', 'api.github.com', '/user', 'GitHub API write'],
       ['POST', 'gitlab.com', '/api/v4/projects/1/merge_requests', 'GitLab API write'],
+      ['POST', '127.0.0.1:2375', '/v1.47/images/acme/app/push', 'docker push'],
+      ['POST', 'docker', '/images/app/push', 'docker push'],
     ]
     for (const [m, h, path, rule] of gated) expect(verdict(m, h, path), `${m} ${h}${path}`).toEqual({ action: 'ask', rule })
     const passed: [string, string, string][] = [
       ['POST', 'github.com', '/a/b.git/git-upload-pack'], // fetch
       ['GET', 'registry.npmjs.org', '/left-pad'],
       ['GET', 'ghcr.io', '/v2/acme/app/manifests/1.2.0'], // pull
-      ['POST', 'api.github.com', '/graphql'], // reads too: see presets.ts
+      ['POST', 'api.github.com', '/graphql'], // body not read: a body rule cannot match
       ['GET', 'api.github.com', '/repos/a/b/issues'],
       ['POST', 'api.github.com', '/markdown'],
       ['GET', 'gitlab.com', '/api/v4/projects/1'],
@@ -111,6 +117,38 @@ describe('the default preset', () => {
     for (const cmd of ['npm publish --access public', 'cargo publish', 'docker push ghcr.io/a/b', 'gh pr merge 3 --squash', 'terraform apply -auto-approve'])
       expect(judgeShell(p, cmd.split(' '))?.action, cmd).toBe('ask')
     expect(judgeShell(p, ['git', 'pull'])).toBeUndefined()
+  })
+
+  it('asks about GraphQL mutations by their body, not queries', async () => {
+    const p = await load('irreversible:\n  - preset: default\n')
+    const gql = (host: string, path: string, body: string) => judgeNet(p, { ...req('POST', host, path), body })
+    expect(gql('api.github.com', '/graphql', '{"query":"mutation { addStar(input: {}) { clientMutationId } }"}')).toEqual({ action: 'ask', rule: 'GitHub GraphQL mutation' })
+    expect(gql('api.github.com', '/graphql', '{"query":"query { viewer { login } }"}')).toEqual({ action: 'pass' })
+    expect(gql('gitlab.com', '/api/graphql', '{"query":"mutation { x }"}')).toEqual({ action: 'ask', rule: 'GitLab GraphQL mutation' })
+  })
+
+  it('refuses SSH at the proxy with a reason, unless allowed', async () => {
+    const p = await load('irreversible:\n  - preset: default\n')
+    expect(compileSrt(p).network.deniedDomains).toEqual(['*:22'])
+    expect(compileSrt(await load('irreversible:\n  - tunnel: "*:22"\n    action: allow\n  - preset: default\n')).network.deniedDomains).toEqual([])
+    expect(compileSrt(await load('irreversible:\n  - preset: default\n    action: allow\n')).network.deniedDomains).toEqual([])
+    await expect(load('irreversible:\n  - tunnel: "*"\n')).rejects.toThrow(/needs a :port/)
+  })
+
+  it('keeps the docker socket out unless a socket rule allows it', async () => {
+    const sock = 'network:\n  allowUnixSockets: [/var/run/docker.sock]\n'
+    await expect(load(`${sock}irreversible:\n  - preset: default\n`)).rejects.toThrow(/"docker daemon".*action: allow/)
+    const docker = `${sock}irreversible:\n  - socket: /var/run/docker.sock\n    action: allow\n  - preset: default\n`
+    const all = `${sock}irreversible:\n  - socket: "**"\n    action: allow\n  - preset: default\n`
+    if (process.platform === 'linux') {
+      // srt lets in every socket or none there, so allowing one means allowing them all.
+      await expect(load(docker)).rejects.toThrow(/on Linux any allowUnixSockets entry lets in every socket/)
+      expect(compileSrt(await load(all)).network.allowAllUnixSockets).toBe(true)
+      return
+    }
+    expect(compileSrt(await load(docker)).network.allowUnixSockets).toEqual(['/var/run/docker.sock'])
+    // Not a socket a rule names: let in as asked.
+    expect(compileSrt(await load('network:\n  allowUnixSockets: [/tmp/app.sock]\nirreversible:\n  - preset: default\n')).network.allowUnixSockets).toEqual(['/tmp/app.sock'])
   })
 
   it('is what envgit init writes', async () => {

@@ -1,6 +1,6 @@
 /** Policy → srt settings. See docs/design.md §3.2 */
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
-import { needsInspection, type Gate } from './gate.js'
+import { needsInspection, tunnelDenials, type Gate } from './gate.js'
 import type { Policy } from './schema.js'
 
 /**
@@ -23,11 +23,17 @@ export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath:
   const x = opts.extra ?? {}
   const fs = policy.filesystem ?? {}
   const net = { ...policy.network, allow: [...(policy.network?.allow ?? []), ...(x.allowedDomains ?? [])] }
+  const tunnels = tunnelDenials(policy)
+  const sockets = net.allowUnixSockets ?? []
   return {
     ...(x.allowPty && { allowPty: true }),
     network: {
       allowedDomains: net.allow ?? [],
-      deniedDomains: net.deny ?? [],
+      // Denied before anything is allowed, so `tunnel` rules hold whatever network.allow says.
+      deniedDomains: [...(net.deny ?? []), ...tunnels.domains],
+      ...(tunnels.domains.length && { deniedDomainReasons: tunnels.reasons }),
+      // The loader has refused sockets a `socket` rule guards (load.ts).
+      ...(sockets.length && (process.platform === 'linux' ? { allowAllUnixSockets: true } : { allowUnixSockets: sockets })),
       ...(gate &&
         needsInspection(policy) && {
           tlsTerminate: {

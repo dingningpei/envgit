@@ -90,8 +90,9 @@ network:
 irreversible:                                   # what rewind cannot undo; first match wins
   - net: { host: "github.com", method: POST, path: "/me/scratch.git/git-receive-pack" }
     action: allow                               # or ask (the default), or deny
-  - preset: default                             # stock rules: git push, npm/PyPI/crates publish, image
-                                                # pushes, GitHub/GitLab API writes, and their commands
+  - preset: default                             # stock rules: git push (SSH refused, with why), npm/PyPI/
+                                                # crates publish, image pushes, GitHub/GitLab API writes
+                                                # and GraphQL mutations, the docker socket, their commands
 mcp:                                            # MCP servers whose tools become REPL functions
   github:
     command: github-mcp-server

@@ -14,7 +14,13 @@ export interface NetRequest {
   port: number
   /** Normalized origin-form path, without the query. */
   path: string
+  /** The body as text, read only when a `body` rule could match; OVERSIZE past MAX_BODY. */
+  body?: string | typeof OVERSIZE
 }
+
+/** How much of a body a `body` rule reads. A longer one counts as matching: the gate fails closed. */
+export const MAX_BODY = 1 << 20
+export const OVERSIZE = Symbol('oversize')
 
 export type GateVerdict =
   | { action: 'pass' }
@@ -45,7 +51,20 @@ function hostMatches(pattern: string, host: string, port: number): boolean {
 
 export function netRuleLabel(r: NetRule): string {
   const any = (v: string | string[] | undefined, all: string) => (v === undefined ? all : [v].flat().join('|'))
-  return ['net', any(r.method, '*').toUpperCase(), r.host, any(r.path, '**')].join(' ')
+  return ['net', any(r.method, '*').toUpperCase(), r.host, any(r.path, '**'), ...(r.body ? [`body~${any(r.body.contains, '')}`] : [])].join(' ')
+}
+
+/** Host, method and path: everything of a net rule but its body. */
+function netHeadMatches(n: NetRule, req: NetRequest, method: string): boolean {
+  if (!hostMatches(n.host, req.host, req.port)) return false
+  if (n.method && ![n.method].flat().some(m => m.toUpperCase() === method)) return false
+  return !n.path || [n.path].flat().some(p => glob(p, 'path').test(req.path))
+}
+
+/** Whether judging this request needs its body: a `body` rule matches it otherwise. */
+export function wantsBody(policy: Policy, req: NetRequest): boolean {
+  const method = req.method.toUpperCase()
+  return (policy.irreversible ?? []).some(r => 'net' in r && r.net.body && netHeadMatches(r.net, req, method))
 }
 
 export function judgeNet(policy: Policy, req: NetRequest): GateVerdict {
@@ -59,9 +78,8 @@ export function judgeNet(policy: Policy, req: NetRequest): GateVerdict {
   for (const rule of policy.irreversible ?? []) {
     if (!('net' in rule)) continue
     const n = rule.net
-    if (!hostMatches(n.host, req.host, req.port)) continue
-    if (n.method && ![n.method].flat().some(m => m.toUpperCase() === method)) continue
-    if (n.path && ![n.path].flat().some(p => glob(p, 'path').test(req.path))) continue
+    if (!netHeadMatches(n, req, method)) continue
+    if (n.body && req.body !== OVERSIZE && ![n.body.contains].flat().some(c => typeof req.body === 'string' && req.body.includes(c))) continue
     return { action: rule.action ?? 'ask', rule: rule.name ?? netRuleLabel(n) }
   }
   return { action: 'pass' }
@@ -89,6 +107,58 @@ function scriptCommands(argv: string[]): string[] {
     .split(/\n|;|&&|\|\||\|/)
     .map(c => c.trim().replace(/\s+/g, ' '))
     .filter(Boolean)
+}
+
+/**
+ * The first `socket` rule a unix socket path falls under. On Linux srt lets in every socket or none,
+ * so there every socket rule applies: the first that does not allow, unless one for `**` allows first.
+ */
+export function judgeSocket(policy: Policy, path: string, every = process.platform === 'linux'): { action: IrreversibleAction; rule: string } | undefined {
+  for (const rule of policy.irreversible ?? []) {
+    if (!('socket' in rule)) continue
+    const pats = [rule.socket].flat()
+    const action = rule.action ?? 'ask'
+    const hit = every ? action !== 'allow' || pats.includes('**') : pats.some(p => glob(p, 'path').test(path))
+    if (hit) return { action, rule: rule.name ?? `socket ${pats.join('|')}` }
+  }
+  return undefined
+}
+
+/** srt's deny entries for `tunnel` rules, each with its reason; a rule that allows adds none. */
+export function tunnelDenials(policy: Policy): { domains: string[]; reasons: Record<string, string> } {
+  const domains: string[] = []
+  const reasons: Record<string, string> = {}
+  const allowed = new Set<string>()
+  for (const rule of policy.irreversible ?? []) {
+    if (!('tunnel' in rule)) continue
+    for (const t of [rule.tunnel].flat()) {
+      if (rule.action === 'allow') allowed.add(t)
+      if (rule.action === 'allow' || allowed.has(t) || reasons[t]) continue
+      domains.push(t)
+      // Shown by the client (ssh prints it), so it says what to do instead.
+      reasons[t] = `envgit: refused by irreversible rule "${rule.name ?? `tunnel ${t}`}": the gate cannot see inside this connection, so it cannot tell a push from a fetch; use an https:// remote, where each request is judged`
+    }
+  }
+  return { domains, reasons }
+}
+
+/** A request body as text, up to MAX_BODY; OVERSIZE beyond. Reads the gate's own branch of the body. */
+async function readBody(request: Request): Promise<string | typeof OVERSIZE> {
+  if (!request.body) return ''
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.length
+    if (size > MAX_BODY) {
+      await reader.cancel().catch(() => {})
+      return OVERSIZE
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 /** Whether the policy needs request-level inspection, and with it TLS termination. */
@@ -159,6 +229,7 @@ export class Gate {
     const target = info?.normalizedRequestTarget ?? url.pathname + url.search
     const path = target.split('?')[0] || '/'
     const req: NetRequest = { method: request.method, host, port, path }
+    if (wantsBody(this.policy, req)) req.body = (await info?.unshownBody?.()) ? OVERSIZE : await readBody(request)
     const v = judgeNet(this.policy, req)
     const effect = { kind: 'net', host, port, method: req.method, path } as const
     const action = `${req.method} ${host}${path}`

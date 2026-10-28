@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Gate, irreversibleOf, judgeNet, judgeShell, needsInspection } from '../src/core/policy/gate.js'
+import { Gate, irreversibleOf, judgeNet, judgeShell, judgeSocket, MAX_BODY, needsInspection } from '../src/core/policy/gate.js'
 import type { Policy } from '../src/core/policy/schema.js'
 
 const policy: Policy = {
@@ -100,5 +100,30 @@ describe('Gate', () => {
     expect((await new Gate(policy).checkShell(['git', 'push'])).refused).toMatch(/needs approval/)
     expect(await new Gate(policy, async () => true, 't').checkShell(['git', 'push'])).toEqual({ irreversible: 'shell: git push' })
     expect(await new Gate(policy).checkShell(['ls'])).toEqual({})
+  })
+
+  it('reads the body only for a body rule, and treats an oversized one as matching', async () => {
+    const p: Policy = { irreversible: [{ net: { host: 'x.test', method: 'POST', path: '/graphql', body: { contains: 'mutation' } }, action: 'deny' }] }
+    const post = (body: string, path = '/graphql') => new Request(`https://x.test${path}`, { method: 'POST', body })
+    const g = new Gate(p)
+    expect((await g.filterRequest(post('{"query":"mutation { a }"}'))).action).toBe('deny')
+    expect((await g.filterRequest(post('{"query":"{ a }"}'))).action).toBe('allow')
+    expect((await g.filterRequest(post('x'.repeat(MAX_BODY + 1)))).action).toBe('deny')
+    const other = post('mutation', '/other')
+    expect((await g.filterRequest(other)).action).toBe('allow')
+    expect(other.bodyUsed).toBe(false)
+    expect(g.drain()).toEqual([
+      { kind: 'net', host: 'x.test', port: 443, method: 'POST', path: '/graphql', denied: true, irreversible: { rule: 'net POST x.test /graphql body~mutation', decision: 'denied' } },
+      { kind: 'net', host: 'x.test', port: 443, method: 'POST', path: '/graphql', denied: true, irreversible: { rule: 'net POST x.test /graphql body~mutation', decision: 'denied' } },
+    ])
+  })
+
+  it('judges unix sockets by path, or all of them where srt cannot tell them apart', () => {
+    const p: Policy = { irreversible: [{ socket: '/var/run/docker.sock', action: 'allow' }, { socket: '**/podman.sock', name: 'podman' }] }
+    expect(judgeSocket(p, '/var/run/docker.sock', false)).toEqual({ action: 'allow', rule: 'socket /var/run/docker.sock' })
+    expect(judgeSocket(p, '/run/user/1/podman/podman.sock', false)).toEqual({ action: 'ask', rule: 'podman' })
+    expect(judgeSocket(p, '/tmp/app.sock', false)).toBeUndefined()
+    expect(judgeSocket(p, '/var/run/docker.sock', true)).toEqual({ action: 'ask', rule: 'podman' })
+    expect(judgeSocket({ irreversible: [{ socket: '**', action: 'allow' }, ...p.irreversible!] }, '/tmp/app.sock', true)).toMatchObject({ action: 'allow' })
   })
 })

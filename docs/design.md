@@ -374,11 +374,31 @@ github-mcp-server both ways.
   image pushes on any OCI registry (`PUT /v2/**/manifests/*`), GitHub REST writes (`/repos`, `/orgs`,
   `/user`, `/gists`, `/projects`, `/teams`) and GitLab REST writes. Shell: `git push`,
   `npm|pnpm|yarn npm publish`, `npm unpublish`, `cargo publish`, `twine upload`, `docker push`,
-  `gh pr merge`, `gh release create`, `terraform apply|destroy`. Not covered: GraphQL mutations
-  (`api.github.com/graphql` is a POST for reads too, so GitHub's MCP server would be asked on every
-  read, and rules do not see bodies); `git push` over SSH and `docker push` (the daemon is outside the
-  sandbox), which only the shell rules see. Cloud CLIs (`aws`, `gcloud`) are left to the policy's
-  author: their writes are not one path pattern.
+  `gh pr merge`, `gh release create`, `terraform apply|destroy`. Three paths that a request line
+  does not show are closed with three more rule kinds (M7):
+  - GraphQL mutations (`api.github.com/graphql`, GitLab's `/api/graphql`): POSTs for reads too, so the
+    net rule has `body: { contains: "mutation" }`. The gate reads a body only when a body rule's host,
+    method and path already match (its own branch of srt's tee; the forwarded bytes are untouched), up
+    to 1 MB; a longer body, or one hidden behind a GET, counts as matching — the gate fails closed. A
+    query that only mentions `mutation` (a comment, a string) is asked about too.
+  - `git push` over SSH: `tunnel: "*:22"`. SSH is opaque, so a push cannot be told from a fetch; every
+    SSH connection is refused at the proxy (srt's `deniedDomains`, checked before `network.allow`),
+    with a `deniedDomainReasons` text that ssh prints: `sandbox proxy: github.com:22: 403 envgit:
+    refused by irreversible rule "git push over SSH": … use an https:// remote`. Fetch and clone over
+    SSH are refused too. (With request rules SSH was refused before as well, by `refuseOpaqueTunnels`,
+    but as `Connection closed by UNKNOWN port 65535`.) A `tunnel` rule with `action: allow` adds no
+    deny entry; `ask` denies, as nobody can be asked about a byte stream.
+  - `docker push`: the daemon pushes, outside the sandbox. The sandbox reaches no unix socket unless
+    `network.allowUnixSockets` names it (macOS: by path; Linux: srt lets in every socket or none, so
+    any entry means all), and `socket: ["**/docker.sock", "**/podman.sock", "**/containerd.sock",
+    "**/buildkitd.sock"]` makes the loader refuse a policy that lets one of these in, unless a socket
+    rule with `action: allow` comes first (on Linux, one for `**`). A daemon over TCP is judged by its
+    push endpoint (`POST /v*/images/**/push`).
+
+  Checked on macOS and Linux with real clients: git over SSH (macOS's HTTP-CONNECT script and Linux's
+  socat both print the reason), curl to a local `/graphql` and to api.github.com over TLS (the mutation
+  stopped, the query answered by GitHub), a unix socket refused, refused by the loader, then let in.
+  Cloud CLIs (`aws`, `gcloud`) are left to the policy's author: their writes are not one path pattern.
 - Shell rules are judged the same way before the command starts (a denied one never runs). They see
   the command line and the simple commands of an `sh -c` script, so a variable or a subshell gets past
   them — the net rule is the enforcement, the shell rule is an early, readable stop.
@@ -416,7 +436,7 @@ github-mcp-server both ways.
    - **CI, x86_64, release.** A GitHub Actions workflow running the Linux srt suite (`.github/workflows/test.yml`: Ubuntu 24.04 x86_64, AppArmor's user-namespace restriction lifted for bubblewrap; green on GitHub since 575b3e5, 104 passed and 32 skipped as on the x86_64 desktop; vm tests need KVM and stay manual); x86_64 pins for Firecracker, kernel, image and Node (done, checked on an x86_64 desktop, §3.6); `npm publish` of 0.1.0 as `agent-envgit` (npm refused `envgit` as too close to `env-git`; the command is still `envgit`; package: `dist` without source maps, the default policy, the vm build scripts and guest sources; checked by installing the packed tarball); a default `policy.yaml` that ships rules for the common irreversible commands, so nobody has to know `git-receive-pack` — done: `- preset: default` (§4), checked against a real `git push` to a local smart-HTTP remote, stopped at the request even when the command line hides it.
 7. **M7 — 0.2: keep the first users** (does M6's number but runs before it; see §7.1). 0.1.0 is on npm; what decides the project now is whether the first fifty people who try it get past the install and come back with a question rather than a dead end.
    - **`envgit doctor`.** Done (`src/cli/doctor.ts`): runs before `init`; Node, srt's own dependency check with bubblewrap / socat / ripgrep versions on Linux, ripgrep on macOS (Codex searches with it), a real command in an srt sandbox (the check that matters; when it fails on Linux with the AppArmor sysctl set, the fix names it), Claude Code / Codex / Copilot CLI against the versions checked (2.1.300, 0.162.1, 1.0.104: missing is `info`, older is `warn`), and for the vm backend `/dev/kvm` on Linux, M3+ and macOS 15+ on a Mac, and whether it is built. Exits 1 only when envgit cannot run. Checked on the Mac (M3 Pro) and the x86_64 Ubuntu 24.04 desktop under WSL2 (no AppArmor there, so that branch is covered by unit tests only). Plan as written: one command that checks everything a sandbox tool breaks on: Node ≥ 22, bubblewrap / socat / ripgrep and their versions on Linux, AppArmor's `kernel.apparmor_restrict_unprivileged_userns` on Ubuntu 24.04+, ripgrep on macOS, Claude Code and Codex versions against the ones tested, KVM for the vm backend — each with the fix. Most issues against a sandbox are environment issues.
-   - **The preset's three holes** (`presets.ts` names them): `git push` over SSH, stopped at srt's SOCKS layer on `*:22` with a `deniedDomainReasons` text the ssh client prints; `docker push`, by keeping the docker socket out of the sandbox by default and marking any `allowUnixSockets` entry for it irreversible; GraphQL mutations, by letting a net rule match the request body (`body: { contains: "mutation" }`), which TLS termination already exposes.
+   - **The preset's three holes.** Done (§4): `body` on net rules for GraphQL mutations, a `tunnel` rule refusing SSH with a reason ssh prints, a `socket` rule with `network.allowUnixSockets` for the docker daemon. Differs from the plan in one place: SSH was already refused under request rules (by `refuseOpaqueTunnels`, before srt's deny list), so the change is the reason and the rule's place in the policy's order, not the refusal. Plan as written (`presets.ts` named them): `git push` over SSH, stopped at srt's SOCKS layer on `*:22` with a `deniedDomainReasons` text the ssh client prints; `docker push`, by keeping the docker socket out of the sandbox by default and marking any `allowUnixSockets` entry for it irreversible; GraphQL mutations, by letting a net rule match the request body (`body: { contains: "mutation" }`), which TLS termination already exposes.
    - **`envgit show <step>` and `envgit diff <a> <b>` on the CLI.** The diff exists only in the UI; scripts and CI need it as text.
    - **`envgit export <session>` / `import`.** A tar of `steps.jsonl` plus the snapshots it refers to, so a session can be sent along with a bug report or a demo and rewound on another machine.
    - **Data in, data out, per REPL step.** For each `execute`, record how many bytes the capabilities read into the sandbox and how many came back to the model; `log` and the UI flag an extreme ratio. This is the audit signal for the M5 rerun's 0/3 (§5 M5, demo-m1): the model concluded without looking, and nothing in the record showed it. It does not fix the model's judgement — envgit cannot, and should not try — it makes the gap visible.

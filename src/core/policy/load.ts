@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { parse } from 'yaml'
 import type { McpServerConfig } from '../mcp/client.js'
+import { judgeSocket } from './gate.js'
 import { PRESETS } from './presets.js'
 import type { Policy } from './schema.js'
 
@@ -26,7 +27,20 @@ export async function loadPolicy(path: string): Promise<Policy> {
     })
   }
   for (const rule of policy.irreversible ?? []) {
-    if (!('net' in rule) && !('shell' in rule)) throw new Error(`${path}: irreversible rule needs net or shell: ${JSON.stringify(rule)}`)
+    if (!['net', 'shell', 'tunnel', 'socket'].some(k => k in rule)) throw new Error(`${path}: irreversible rule needs net, shell, tunnel or socket: ${JSON.stringify(rule)}`)
+    if ('tunnel' in rule && [rule.tunnel].flat().some(t => !/:\d+$/.test(t))) throw new Error(`${path}: irreversible tunnel ${JSON.stringify(rule.tunnel)} needs a :port (e.g. "*:22")`)
+    if ('net' in rule && rule.net.body && typeof rule.net.body.contains !== 'string' && !Array.isArray(rule.net.body.contains)) throw new Error(`${path}: irreversible net body needs contains: ${JSON.stringify(rule.net.body)}`)
+  }
+  // A socket is a standing grant, not a request: there is no one to ask, so only `allow` lets it in.
+  for (const sock of policy.network?.allowUnixSockets ?? []) {
+    const hit = judgeSocket(policy, sock)
+    if (hit && hit.action !== 'allow') {
+      const anySocket = process.platform === 'linux' ? ' (on Linux any allowUnixSockets entry lets in every socket, this one included)' : ''
+      throw new Error(
+        `${path}: network.allowUnixSockets ${JSON.stringify(sock)} would let the sandbox reach what irreversible rule "${hit.rule}" guards${anySocket}: ` +
+          'a daemon behind it acts outside the sandbox and outside every snapshot. To allow it on purpose, add a socket rule with `action: allow` before the preset line.',
+      )
+    }
   }
   for (const [name, server] of Object.entries(policy.mcp ?? {})) {
     // Each server is a global in the REPL, next to its own.
