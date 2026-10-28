@@ -1,5 +1,5 @@
 {
-  "name": "envgit",
+  "name": "agent-envgit",
   "version": "0.1.0",
   "description": "Version control for agent execution environments",
   "license": "Apache-2.0",

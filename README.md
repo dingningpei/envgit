@@ -43,7 +43,7 @@ Sandboxes already isolate well: Seatbelt, bubblewrap, Firecracker. envgit adds w
 It needs Node 22 or newer, and macOS or Linux. On Linux the sandbox also needs `bubblewrap`, `socat` and `ripgrep`.
 
 ```bash
-npm install -g envgit
+npm install -g agent-envgit   # the command is `envgit`
 ```
 
 Or from source: `git clone https://github.com/dingningpei/envgit.git && cd envgit && npm install && npm run build && npm link`.
@@ -115,7 +115,7 @@ See [`examples/policy.yaml`](examples/policy.yaml) and [design §3.2, §4](docs/
 | Rewind brings back | files | files, plus the processes that were running, with their state |
 | Runs on | macOS, Linux | Apple-silicon Macs (M3 or later, macOS 15+), nested in a Virtualization-framework VM; arm64 or x86_64 Linux with KVM (plus `squashfs-tools`) |
 
-To use the VM, set `backend: vm` in the policy, run `scripts/vm/build.sh` once (from an npm install: `"$(npm root -g)/envgit/scripts/vm/build.sh"`; it needs Go, and on macOS Xcode's `swiftc`), then run `envgit vm up`. The build script downloads pinned kernels, Firecracker and images into `~/.cache/envgit/vm`, each checked against its publisher's checksum (the Firecracker CI kernels, whose bucket publishes none, against our own pin), and prebuilds a warm base snapshot. After that, `vm up` takes about 2 s and a step about 0.4 s.
+To use the VM, set `backend: vm` in the policy, run `scripts/vm/build.sh` once (from an npm install: `"$(npm root -g)/agent-envgit/scripts/vm/build.sh"`; it needs Go, and on macOS Xcode's `swiftc`), then run `envgit vm up`. The build script downloads pinned kernels, Firecracker and images into `~/.cache/envgit/vm`, each checked against its publisher's checksum (the Firecracker CI kernels, whose bucket publishes none, against our own pin), and prebuilds a warm base snapshot. After that, `vm up` takes about 2 s and a step about 0.4 s.
 
 On the VM backend:
 - **Host workdir:** it becomes a read-only mirror of the guest's `/work`, synced after every step. `envgit vm push <path>` sends your own edits in, as a step.
