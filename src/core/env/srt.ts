@@ -67,7 +67,11 @@ export class SrtBackend implements EnvBackend {
     const [file, ...args] = wrapped.argv
     if (!file) throw new Error('srt: empty wrapped command')
     // Node's fetch ignores HTTP(S)_PROXY unless told to, and in the sandbox the proxy is the only way out.
-    const child = spawn(file, args, { cwd, env: { NODE_USE_ENV_PROXY: '1', ...SYSTEM_ROOTS, ...wrapped.env, ...cmd.env }, stdio })
+    const childEnv: NodeJS.ProcessEnv = { NODE_USE_ENV_PROXY: '1', ...SYSTEM_ROOTS, ...wrapped.env, ...cmd.env }
+    // Node 22–24 then warn, in every node process the command starts, that the proxy agent is
+    // experimental (UNDICI-EHPA): envgit's setting, not the agent's, so not the agent's output.
+    childEnv.NODE_OPTIONS = [childEnv.NODE_OPTIONS, '--disable-warning=UNDICI-EHPA'].filter(Boolean).join(' ')
+    const child = spawn(file, args, { cwd, env: childEnv, stdio })
     return { child, commandId }
   }
 

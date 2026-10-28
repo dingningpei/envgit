@@ -40,7 +40,11 @@ const STEPS: { says: string; argv: string[] }[] = [
   { says: 'try it', argv: ['node', 'greet.js', 'envgit'] },
   { says: 'commit it', argv: ['sh', '-c', 'git add greet.js && git commit -q -m "add greet.js" && git log --oneline -1'] },
   { says: 'release it', argv: ['sh', 'release.sh'] },
-  { says: 'the push failed, so start over', argv: ['sh', '-c', 'git reset -q --hard HEAD~1 && ls'] },
+  // The commit, its file, and git's own way back to them (the reflog): only the rewind is left.
+  {
+    says: 'the push failed, so throw the work away, history and all',
+    argv: ['sh', '-c', 'git reset -q --hard HEAD~1 && git reflog expire --expire=now --all && git gc -q --prune=now && ls && git log --oneline'],
+  },
 ]
 const REWIND_TO = 2
 
@@ -49,6 +53,7 @@ export async function demo(args: string[]): Promise<number> {
   const color = process.stdout.isTTY
   const dim = (s: string) => (color ? `\x1b[2m${s}\x1b[0m` : s)
   const bold = (s: string) => (color ? `\x1b[1m${s}\x1b[0m` : s)
+  const red = (s: string) => (color ? `\x1b[1;31m${s}\x1b[0m` : s)
   const t0 = Date.now()
 
   // A git smart-HTTP remote on loopback that advertises an empty repo, so `git push` gets as far as
@@ -66,23 +71,32 @@ export async function demo(args: string[]): Promise<number> {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'envgit-demo-')))
 
   // This process's own CLI, under the same node flags (tsx in `npm run dev`).
+  const out = (s: string) => process.stdout.write(s.replace(/^(?=.)/gm, '    '))
   const self = [...process.execArgv, process.argv[1]!]
   const envgit = (argv: string[]) =>
     new Promise<number>((resolve, reject) => {
       const p = spawn(process.execPath, [...self, ...argv], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
-      const indent = (s: Buffer) => process.stdout.write(String(s).replace(/^(?=.)/gm, '    '))
-      p.stdout.on('data', indent)
-      p.stderr.on('data', indent)
+      let text = ''
+      p.stdout.on('data', (s: Buffer) => (text += s))
+      p.stderr.on('data', (s: Buffer) => (text += s))
       p.on('error', reject)
-      p.on('close', c => resolve(c ?? 1))
+      p.on('close', c => {
+        // envgit reports a refusal after the step ends, below what the command printed about it
+        // (git's 403, then a closing "Everything up-to-date"); the refusal is the news, so it goes first.
+        const lines = text.split('\n').filter(Boolean)
+        const denied = lines.filter(l => l.startsWith('envgit: denied'))
+        if (denied.length) out(`${denied.map(red).join('\n')}\n\n${dim(lines.filter(l => !denied.includes(l)).join('\n'))}\n`)
+        else out(text)
+        resolve(c ?? 1)
+      })
     })
   const git = (...a: string[]) => exec('git', a, { cwd: dir }).then(r => r.stdout)
   const quote = (a: string) => (/^[\w./=-]+$/.test(a) ? a : /["$`\\]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : `"${a}"`)
   const show = (argv: string[]) => argv.map(quote).join(' ').replace(/\n/g, '\n      ')
-  const out = (s: string) => process.stdout.write(s.replace(/^(?=.)/gm, '    '))
 
   try {
-    console.log(bold('envgit demo') + dim(` — a scripted agent in ${dir}`))
+    console.log(bold('envgit records every step an agent takes, stops the ones a rewind can’t undo, and brings the rest back.'))
+    console.log(`\nenvgit demo` + dim(` — a scripted agent in ${dir}`))
     console.log(dim(`  a git repo whose origin is a local smart-HTTP remote (${remote}),`))
     console.log(dim('  policy: write the workdir, reach 127.0.0.1, refuse the stock irreversible actions'))
     if ((await envgit(['init'])) !== 0) throw new Error('envgit init failed')
@@ -112,7 +126,7 @@ export async function demo(args: string[]): Promise<number> {
     console.log(`\n${bold('the timeline')}`)
     console.log('  $ envgit log')
     await envgit(['log'])
-    console.log(`\n${bold('rewind')} ${dim(`to step ${REWIND_TO}, before the push and the reset`)}`)
+    console.log(`\n${bold('rewind')} ${dim(`to step ${REWIND_TO}, after the commit: before the push, the reset and the gc`)}`)
     console.log(`  $ envgit rewind ${REWIND_TO}`)
     if ((await envgit(['rewind', String(REWIND_TO)])) !== 0) throw new Error('rewind failed')
     console.log('  $ git log --oneline && cat greet.js')
@@ -122,6 +136,7 @@ export async function demo(args: string[]): Promise<number> {
     console.log(dim(`\ndone in ${((Date.now() - t0) / 1000).toFixed(1)}s.`))
     if (keep) console.log(`kept ${dir}: \`cd\` there and try \`envgit ui\`, \`envgit show 3\`, \`envgit log\`.`)
     else console.log(dim('`envgit demo --keep` keeps the directory to look around in (`envgit ui`, `envgit show 3`).'))
+    console.log(`to start: ${bold('envgit init')} in your own project, then \`envgit run <cmd>\`, \`envgit claude\` or \`envgit codex\`.`)
     return 0
   } finally {
     server.close()
