@@ -83,3 +83,37 @@ sandbox*. Each run exposed one of these:
 - Five earlier runs with an ambiguous spec (`node:fs/promises` → `fs` or `fs/promises`?) and a bug in
   output-token accounting were discarded; raw transcripts are kept locally only (`demo/results/*.jsonl`
   is git-ignored).
+
+## M5 rerun: GitHub's MCP server
+
+The runs above compare envgit's own tools with themselves. With the generic bridge (design §3.3),
+the same two arms run against [GitHub's MCP server](https://github.com/github/github-mcp-server)
+v2.0.3 (`stdio --read-only`, release checksum verified) inside envgit's sandbox: **tools** gets its
+`list_issues` and `issue_read` as MCP tools with the server's own schemas (`envgit mcp --tools`),
+**execute** gets them as `github.list_issues(…)` in the REPL with generated declarations.
+
+```bash
+GITHUB_TOKEN=… DEMO_GITHUB_MCP=/path/to/github-mcp-server DEMO_CORPUS=github node scripts/demo.mjs
+```
+
+Task: of the first 150 issues (not PRs) ever opened in `modelcontextprotocol/typescript-sdk`, how
+many are closed, how many carry each label, and the 5 most commented. Ground truth is taken from
+GitHub's REST API at the start of the run (`demo/results/github-ground-truth.json`).
+
+| Arm | Runs | Correct | Requests | Tool calls | Tool result chars | Context tokens | Output tokens | Cost |
+|---|---|---|---|---|---|---|---|---|
+| tools | 3 | 3/3 | 3 | 2 | 18,410 | 28,777 | 2,222 | $0.136 |
+| execute | 3 | 3/3 | 3 | 2 | 1,755 | 17,479 | 841 | $0.056 |
+
+**Ratios (medians):** 1.6× fewer context tokens, 2.6× fewer output tokens, 2.4× cheaper; both arms
+always right.
+
+- **The server already trims.** `list_issues` takes a `fields` list, and every run in both arms asked
+  only for number, state, labels and comments, so the tools arm read 18k characters, not the full
+  issue bodies. The saving here is what is left after the server's own filtering: the tools arm
+  still had to read every issue and count in its head (its output tokens are the counting).
+- **`execute` paged and counted in code** and returned the aggregate. One run spent two extra calls
+  checking the ordering (`created_at` monotone, no PRs), which took its context to 28.7k, level with
+  the tools arm, at less than half the cost.
+- The same task at 1,500 issues would need 15 pages; the tools arm's history grows with every page,
+  `execute`'s does not.

@@ -44,7 +44,6 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     const { tools } = await client.listTools()
     expect(tools.map(t => t.name)).toEqual(['execute'])
     expect(tools[0]!.description).toContain('declare const fs')
-    expect(tools[0]!.description).toContain('getIssue')
   })
 
   it('keeps state across calls', async () => {

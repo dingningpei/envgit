@@ -1,40 +1,61 @@
-/** Capabilities injected into the REPL, driven by policy.capabilities. See docs/design.md §3.2–3.3 */
+/** Capabilities injected into the REPL, driven by policy.capabilities and policy.mcp. See docs/design.md §3.2–3.3 */
 import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { Effect } from '../core/env/backend.js'
-import type { Policy } from '../core/policy/schema.js'
 import { proxiedFetch } from '../core/env/proxied-fetch.js'
+import { McpClient, type McpServerConfig } from '../core/mcp/client.js'
+import { declareServer } from '../core/mcp/declare.js'
+import type { Policy } from '../core/policy/schema.js'
 
 export interface Capabilities {
   globals: Record<string, unknown>
   /** TypeScript-style declarations of the injected API, shown to the model. */
   declarations: string
+  /** The same functions as one MCP tool each, for `envgit mcp --tools`. */
+  tools: DirectTool[]
+  /** Stops the MCP servers. */
+  close(): void
+}
+
+/** One injected function as a tool: `<path[0]>[path[1]](...args)`, args from the input by `params` (or the input itself). */
+export interface DirectTool {
+  name: string
+  description?: string
+  inputSchema: unknown
+  path: [string, string]
+  params: string[] | 'input'
 }
 
 type Caps = NonNullable<Policy['capabilities']>
 
-const GITHUB = {
-  listIssues: {
-    decl: 'listIssues(args: { owner: string; repo: string; state?: "open" | "closed" | "all"; per_page?: number }): Promise<Issue[]>',
-    fn: (gh: GitHubClient) => (a: { owner: string; repo: string; state?: string; per_page?: number }) =>
-      gh(`/repos/${seg(a.owner)}/${seg(a.repo)}/issues`, { state: a.state ?? 'open', per_page: String(a.per_page ?? 30) }),
+const FS_TOOLS: DirectTool[] = [
+  { name: 'readFile', description: 'Read a UTF-8 text file.', path: ['fs', 'readFile'], params: ['path'], inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+  {
+    name: 'writeFile',
+    description: 'Write a UTF-8 text file.',
+    path: ['fs', 'writeFile'],
+    params: ['path', 'data'],
+    inputSchema: { type: 'object', properties: { path: { type: 'string' }, data: { type: 'string' } }, required: ['path', 'data'] },
   },
-  getIssue: {
-    decl: 'getIssue(args: { owner: string; repo: string; number: number }): Promise<Issue>',
-    fn: (gh: GitHubClient) => (a: { owner: string; repo: string; number: number }) =>
-      gh(`/repos/${seg(a.owner)}/${seg(a.repo)}/issues/${Number(a.number)}`),
-  },
-} as const
-
-type GitHubClient = (path: string, query?: Record<string, string>) => Promise<unknown>
+  { name: 'readdir', description: "List a directory. Directory names end with '/'.", path: ['fs', 'readdir'], params: ['path'], inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
+]
 
 /**
  * Effects are observed here, at the syscall/proxy result the wrapper sees. This is
  * the reliable per-step channel; the macOS violation log drops events.
+ *
+ * MCP servers are started here, inside the sandbox the worker runs in: what they read, write and
+ * request is the sandbox's to allow and the gate's to judge, and lands on the step like the REPL's own.
  */
-export function buildCapabilities(caps: Caps, workdir: string, onEffect: (e: Effect) => void = () => {}): Capabilities {
+export async function buildCapabilities(
+  caps: Caps,
+  workdir: string,
+  onEffect: (e: Effect) => void = () => {},
+  servers: Record<string, McpServerConfig> = {},
+): Promise<Capabilities> {
   const globals: Record<string, unknown> = {}
   const decls = ['declare function print(...values: unknown[]): void']
+  const tools: DirectTool[] = []
   const tracedFetch = traceFetch(onEffect)
 
   if (caps.fs === true) {
@@ -59,6 +80,7 @@ export function buildCapabilities(caps: Caps, workdir: string, onEffect: (e: Eff
   /** Directory names end with '/'. */
   readdir(path?: string): Promise<string[]>
 }`)
+    tools.push(...FS_TOOLS)
   }
 
   if (caps.http === true) {
@@ -69,23 +91,27 @@ export function buildCapabilities(caps: Caps, workdir: string, onEffect: (e: Eff
     decls.push('declare function fetch(input: string | URL | Request, init?: RequestInit): Promise<Response>')
   }
 
-  const gh = allowed(caps.github, Object.keys(GITHUB)) as (keyof typeof GITHUB)[]
-  if (gh.length) {
-    const client = githubClient(tracedFetch)
-    globals.github = Object.fromEntries(gh.map(n => [n, GITHUB[n].fn(client)]))
-    decls.push(`type Issue = { number: number; title: string; state: string; body: string | null; labels: { name: string }[]; user: { login: string }; html_url: string }
-declare const github: {
-${gh.map(n => `  ${GITHUB[n].decl}`).join('\n')}
-}`)
+  const clients: McpClient[] = []
+  const close = () => clients.forEach(c => c.close())
+  try {
+    for (const [name, config] of Object.entries(servers)) {
+      const client = await McpClient.start(name, config, workdir)
+      clients.push(client)
+      const only = caps[name]
+      const listed = (await client.listTools()).filter(t => !Array.isArray(only) || only.includes(t.name))
+      globals[name] = Object.fromEntries(listed.map(t => [t.name, (args?: unknown) => client.callTool(t.name, args)]))
+      decls.push(declareServer(name, listed))
+      const taken = new Set(tools.map(t => t.name))
+      for (const t of listed) {
+        tools.push({ name: taken.has(t.name) ? `${name}_${t.name}` : t.name, description: t.description, inputSchema: t.inputSchema ?? { type: 'object' }, path: [name, t.name], params: 'input' })
+      }
+    }
+  } catch (e) {
+    close()
+    throw e
   }
 
-  return { globals, declarations: decls.join('\n') }
-}
-
-function allowed(cap: boolean | string[] | undefined, all: string[]): string[] {
-  if (cap === true) return all
-  if (Array.isArray(cap)) return cap.filter(n => all.includes(n))
-  return []
+  return { globals, declarations: decls.join('\n'), tools, close }
 }
 
 function traceFetch(onEffect: (e: Effect) => void): typeof fetch {
@@ -113,18 +139,4 @@ function proxyRefused(e: unknown): boolean {
     if (/Proxy response \(403\)/.test(c.message)) return true
   }
   return false
-}
-
-function githubClient(fetch: typeof globalThis.fetch): GitHubClient {
-  return async (path, query) => {
-    const url = new URL(path, 'https://api.github.com')
-    for (const [k, v] of Object.entries(query ?? {})) url.searchParams.set(k, v)
-    const res = await fetch(url, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'envgit' } })
-    if (!res.ok) throw new Error(`GitHub ${res.status} ${res.statusText}: ${url.pathname}`)
-    return res.json()
-  }
-}
-
-function seg(s: string): string {
-  return encodeURIComponent(String(s))
 }

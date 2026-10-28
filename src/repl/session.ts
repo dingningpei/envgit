@@ -9,7 +9,8 @@ import type { Effect, Env } from '../core/env/backend.js'
 import { toEffect, type SrtBackend } from '../core/env/srt.js'
 import type { Policy } from '../core/policy/schema.js'
 import { acquireBusy, ensureBase, readHead, recordStep, releaseBusy, type OpenSession, type Snapshotting, type StepRef } from '../core/snapshot/log.js'
-import { CAPABILITIES_ENV, type WorkerMessage, type WorkerRequest } from './worker.js'
+import { mcpServers } from '../core/policy/load.js'
+import { CAPABILITIES_ENV, DESCRIBE, MCP_ENV, type Description, type WorkerMessage, type WorkerRequest } from './worker.js'
 
 export interface ReplResult {
   output: string
@@ -21,6 +22,8 @@ export interface ReplResult {
 /** What the MCP server drives: srt's ReplSession or the vm backend's VmReplSession. */
 export interface Repl {
   execute(code: string): Promise<ReplResult>
+  /** The injected API: starts the worker (and its MCP servers) if need be. Not a step. */
+  describe(): Promise<Description>
   close(): Promise<void>
 }
 
@@ -53,6 +56,36 @@ export class ReplSession implements Repl {
 
   execute(code: string): Promise<ReplResult> {
     const run = this.queue.then(() => this.run(code))
+    this.queue = run.catch(() => {})
+    return run
+  }
+
+  describe(): Promise<Description> {
+    const run = this.queue.then(async () => {
+      // The base first: an MCP server starting up may already write in the workdir.
+      await acquireBusy(this.snap.store.root)
+      try {
+        await ensureBase(this.session, this.snap)
+      } finally {
+        await releaseBusy(this.snap.store.root)
+      }
+      const worker = await this.ensureWorker()
+      const id = this.nextId++
+      try {
+        const reply = await Promise.race([
+          new Promise<WorkerMessage & { id: number }>(resolve => {
+            worker.pending.set(id, resolve)
+            worker.child.stdin!.write(JSON.stringify({ id, code: DESCRIBE } satisfies WorkerRequest) + '\n')
+          }),
+          worker.exited.then(() => Promise.reject(new Error('REPL worker exited'))),
+        ])
+        if (!('output' in reply)) throw new Error('REPL worker gave no description')
+        if (reply.error) throw new Error(reply.error)
+        return JSON.parse(reply.output) as Description
+      } finally {
+        worker.pending.delete(id)
+      }
+    })
     this.queue = run.catch(() => {})
     return run
   }
@@ -151,7 +184,7 @@ export class ReplSession implements Repl {
       this.env,
       {
         argv,
-        env: { [CAPABILITIES_ENV]: JSON.stringify(this.policy.capabilities ?? {}), NODE_USE_ENV_PROXY: '1' },
+        env: { [CAPABILITIES_ENV]: JSON.stringify(this.policy.capabilities ?? {}), [MCP_ENV]: JSON.stringify(mcpServers(this.policy)), NODE_USE_ENV_PROXY: '1' },
       },
       ['pipe', 'pipe', 'pipe'],
     )

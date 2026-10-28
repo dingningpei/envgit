@@ -2,12 +2,19 @@
 import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import os from 'node:os'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { SandboxManager, type SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
 import { compileSrt } from '../policy/compile.js'
 import type { Gate } from '../policy/gate.js'
 import type { Command, Effect, Env, EnvBackend, EnvSpec, ExecResult, SnapshotId } from './backend.js'
 
 const MAX_CAPTURE = 1 << 20
+/**
+ * Go (gh, github-mcp-server) on macOS verifies through the system's trust daemon, which the sandbox
+ * denies, unless SSL_CERT_FILE names a bundle. srt sets it only when it terminates TLS; for an opaque
+ * tunnel this points it at the system's own roots (not roots added to the keychain).
+ */
+const SYSTEM_ROOTS = process.platform === 'darwin' && existsSync('/etc/ssl/cert.pem') ? { SSL_CERT_FILE: '/etc/ssl/cert.pem' } : {}
 
 export function shellQuote(argv: string[]): string {
   return argv.map(a => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(' ')
@@ -60,7 +67,7 @@ export class SrtBackend implements EnvBackend {
     const [file, ...args] = wrapped.argv
     if (!file) throw new Error('srt: empty wrapped command')
     // Node's fetch ignores HTTP(S)_PROXY unless told to, and in the sandbox the proxy is the only way out.
-    const child = spawn(file, args, { cwd, env: { NODE_USE_ENV_PROXY: '1', ...wrapped.env, ...cmd.env }, stdio })
+    const child = spawn(file, args, { cwd, env: { NODE_USE_ENV_PROXY: '1', ...SYSTEM_ROOTS, ...wrapped.env, ...cmd.env }, stdio })
     return { child, commandId }
   }
 

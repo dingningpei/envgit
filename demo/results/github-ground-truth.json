@@ -1,0 +1,30 @@
+{
+  "closed": 138,
+  "labels": {
+    "bug": 63,
+    "enhancement": 47,
+    "P2": 11,
+    "needs decision": 10,
+    "P3": 8,
+    "needs confirmation": 9,
+    "documentation": 2,
+    "ready for work": 19,
+    "potentially close": 4,
+    "P1": 12,
+    "question": 1,
+    "fix proposed": 4,
+    "needs repro": 4,
+    "breaking change": 1,
+    "v2": 4,
+    "auth": 5,
+    "good first issue": 1,
+    "help wanted": 1
+  },
+  "mostCommented": [
+    164,
+    220,
+    116,
+    245,
+    167
+  ]
+}

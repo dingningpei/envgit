@@ -1,4 +1,5 @@
 /** Policy file shape. See docs/design.md §3.2 */
+import type { McpServerConfig } from '../mcp/client.js'
 
 export interface Policy {
   /** Environment backend: `srt` (default, OS sandbox) or `vm` (nested Firecracker, docs/design.md §3.6). */
@@ -15,7 +16,16 @@ export interface Policy {
     /** Hosts never TLS-terminated (certificate pinning, mTLS); request rules cannot see their HTTPS traffic. */
     noInspect?: string[]
   }
+  /**
+   * What the REPL exposes: `fs`, `http`, and each MCP server below by name (on unless `false`; a list
+   * keeps only those tools).
+   */
   capabilities?: Record<string, boolean | string[]>
+  /**
+   * MCP servers whose tools become REPL functions (`await <name>.<tool>(args)`). They run inside the
+   * sandbox, started by the REPL worker; `${VAR}` in `env` comes from envgit's environment.
+   */
+  mcp?: Record<string, McpServerConfig>
   irreversible?: IrreversibleRule[]
   /**
    * `exclude`: workdir paths (prefixes) left out of snapshots (`.envgit` always is).

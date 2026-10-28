@@ -184,7 +184,7 @@ async function mcp(mode: 'repl' | 'tools'): Promise<number> {
     await vm.create({ workdir: process.cwd() })
     const repl = new VmReplSession(vm, policy, session, snapshotting(policy), gate)
     try {
-      await serveMcp(repl, policy, process.cwd(), mode, gate)
+      await serveMcp(repl, mode, gate)
     } finally {
       await repl.close()
     }
@@ -196,7 +196,7 @@ async function mcp(mode: 'repl' | 'tools'): Promise<number> {
   const env = await backend.create({ workdir: process.cwd(), policy, snapshots: snap, gate })
   const repl = new ReplSession(backend, env, policy, session, snap)
   try {
-    await serveMcp(repl, policy, process.cwd(), mode, gate)
+    await serveMcp(repl, mode, gate)
     return 0
   } finally {
     await repl.close()

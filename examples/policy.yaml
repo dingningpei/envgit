@@ -6,10 +6,17 @@ network:
   allow: ["api.github.com:443", "registry.npmjs.org"]
   l7:
     api.github.com: { methods: [GET] }
-capabilities:
-  github: [listIssues, getIssue]
+capabilities:            # what the REPL (`envgit mcp`) exposes as functions
   fs: true
   shell: false
+# MCP servers whose tools become REPL functions: `await github.list_issues({ owner, repo })`. They run
+# inside the sandbox, so their requests meet the rules above; `${VAR}` comes from envgit's environment.
+# `capabilities.<name>: [tool, …]` keeps only those tools, `false` turns a server off.
+# mcp:
+#   github:
+#     command: github-mcp-server
+#     args: [stdio, --read-only]
+#     env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" }
 # Irreversible actions cross the snapshot boundary, so rewind cannot undo them. Each is gated:
 # action: ask (default) asks at the terminal or the MCP client, deny refuses, allow only marks the step.
 # Net rules see HTTPS requests because the proxy terminates TLS when any request rule exists.

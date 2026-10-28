@@ -71,7 +71,7 @@ envgit rewind 0          # back to just after step 0
 - **Copilot CLI** has no per-run hooks, so `hooks install` writes `.github/hooks/envgit.json`. It contains this machine's paths; keep it out of commits.
 - **Under Codex, Claude Code and `envgit run`**, irreversible actions are stopped at the HTTP(S) request, in the proxy — including Codex's own HTTP calls. **Under Copilot CLI** only the shell rules apply today, and those match command lines, which a variable or a subshell gets past; there envgit records, and refuses the obvious cases, but does not yet enforce.
 
-The MCP server exposes one tool, `execute`, which runs JavaScript in a persistent REPL inside the sandbox. The capabilities your policy grants (`fs`, `http`, `github: [listIssues, …]`) appear in it as async functions. Intermediate results stay in the REPL instead of the model's context: in [our measurement](docs/demo-m1.md) that took 1.6× fewer tokens than one tool per capability on a small task, and 9.4× fewer on a large one.
+The MCP server exposes one tool, `execute`, which runs JavaScript in a persistent REPL inside the sandbox. The capabilities your policy grants appear in it as async functions: `fs`, `http`, and the tools of any MCP server you list under `mcp:` (`await github.list_issues({ owner, repo })`), declared to the model as TypeScript generated from each tool's JSON Schema. Those servers run inside the sandbox too, so their own requests meet the same rules. Intermediate results stay in the REPL instead of the model's context: in [our measurement](docs/demo-m1.md) that took 1.6× fewer tokens than one tool per capability on a small task, and 9.4× fewer on a large one.
 
 ## Policy
 
@@ -90,6 +90,11 @@ irreversible:                                   # what rewind cannot undo
   - net: { host: "registry.npmjs.org", method: PUT }                          # npm publish
   - shell: ["git push", "npm publish"]
     action: deny                                # or ask (the default), or allow (just mark the step)
+mcp:                                            # MCP servers whose tools become REPL functions
+  github:
+    command: github-mcp-server
+    args: [stdio, --read-only]
+    env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" }   # from envgit's environment
 snapshot:
   maxBytes: 10G                                 # drop the oldest rewind points to stay under this
 ```
@@ -148,7 +153,8 @@ Known gaps (see [design §7](docs/design.md) for the full review and [§5](docs/
 - The VM backend is arm64 only; x86_64 is not built yet.
 - The Codex integration relies on `codex exec-server`, which Codex marks as experimental. It was written against Codex 0.162.1.
 - Under Copilot CLI, the agent runs its own tools outside envgit's sandbox. envgit can judge shell command lines there, but not individual HTTP requests — so there it records rather than enforces.
-- The REPL's capabilities are built in (`fs`, `http`, two GitHub calls); a generic MCP-server bridge is not implemented yet.
+- The REPL connects stdio MCP servers only; remote (streamable HTTP) servers are not supported yet. A server gets the tokens you give it, and code in the REPL runs in the same sandbox, so it can read them too.
+- With request-level network rules on, requests to IPv6-literal addresses (`http://[::1]/`) are refused: sandbox-runtime's Host check compares them in two different spellings.
 - The VM backend on macOS is nested (a Firecracker VM inside a Virtualization-framework VM), which makes a warm step ≈ 1 s; it is for trying memory-level rewind. The intended production shape is Firecracker on a Linux host.
 - On Linux, srt hides read-denied directories instead of refusing reads, so those denials don't show up in the log.
 

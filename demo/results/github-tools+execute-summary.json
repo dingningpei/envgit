@@ -1,0 +1,26 @@
+[
+  {
+    "corpus": "github",
+    "arm": "tools",
+    "correct": "3/3",
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 18410,
+    "firstRequestContext": 4855,
+    "contextTokens": 28777,
+    "outputTokens": 2222,
+    "costUsd": 0.1361898
+  },
+  {
+    "corpus": "github",
+    "arm": "execute",
+    "correct": "3/3",
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 1755,
+    "firstRequestContext": 4853,
+    "contextTokens": 17479,
+    "outputTokens": 841,
+    "costUsd": 0.0563988
+  }
+]

@@ -62,9 +62,11 @@ network:
   l7:
     api.github.com: { methods: [GET] }
 capabilities:            # what the REPL exposes as functions
-  github: [listIssues, getIssue]
   fs:     true
   shell:  false
+  github: [list_issues, get_issue]   # an MCP server below; a list keeps only those tools
+mcp:                     # MCP servers whose tools become REPL functions (§3.3)
+  github: { command: github-mcp-server, args: [stdio, --read-only], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" } }
 irreversible:            # gated (§4): ask (default) / deny / allow, always logged red
   - net: { host: "github.com", method: POST, path: "/**/git-receive-pack" }   # git push
   - net: { host: "registry.npmjs.org", method: PUT }                          # npm publish
@@ -77,7 +79,12 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 ### 3.3 REPL (`src/repl`)
 
 - `node:vm` context in a long-lived worker process that runs under the env backend (srt in M1); the backend is the security boundary, `node:vm` only provides persistence. Persistent across steps (variables survive). The engine sits behind an `Engine` interface so QuickJS / isolated-vm can slot in where an in-process boundary is wanted.
-- Tools (MCP, CLI, HTTP) injected as typed async functions per `capabilities`.
+- Tools injected as typed async functions per `capabilities`: `fs`, `http` (`fetch`), and each MCP server under `mcp:` (`src/core/mcp`).
+  - **MCP servers run inside the sandbox.** The worker starts each one (stdio) as its own child, so a server's file access and requests are the sandbox's to allow and the gate's to judge, and land on the REPL step that called it — like everything else the step does. A server run by envgit outside would be a hole: its requests would never reach the proxy. On vm the server runs in L2, part of the snapshot, so rewind brings it back as it was. The client is a hand-written minimum (initialize, `tools/list` with paging, `tools/call`; server requests other than ping are refused), dependency-free so the vm worker stays a few files.
+  - Each tool becomes `<server>.<tool>(args)` (quoted when the name is not an identifier). Its declaration is TypeScript printed from the tool's `inputSchema` (and `outputSchema`, if any), descriptions as JSDoc, so the model sees what to pass. A result comes back as `structuredContent` when there is one, else its single text block parsed as JSON when it parses, else as text; `isError` throws.
+  - `capabilities.<server>: [tools]` keeps only those tools, `false` turns the server off. `${VAR}` in a server's `env` is filled in by envgit outside the sandbox (on vm the worker's environment is the guest's). A token handed to a server sits in the same sandbox as the REPL's code, which can read it: `node:vm` is not a boundary (above).
+  - The declarations are known only once the servers answer, so `envgit mcp` starts the worker before it serves and asks it (`describe`, not a step); a server that will not start stops `envgit mcp` with its stderr. `envgit mcp --tools` serves the same functions as one MCP tool each, with the schemas the servers gave, each call still a REPL step: the comparison arm for the demo.
+  - Not yet: remote (streamable HTTP) servers; server notifications such as `tools/list_changed`.
 - Only `print()` / return value goes back to the model; everything else stays in the sandbox.
 - Each `execute` is one Step → one snapshot. On the vm backend the worker runs inside the guest and
   is part of that snapshot, so `rewind` restores REPL variables too (§3.6); on srt it resets them.
@@ -333,7 +340,11 @@ turns on srt's TLS termination — a per-run CA that srt makes trusted inside th
 `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO` and friends — and its
 `filterRequest` hook, so every HTTP(S) request reaches the gate with method, canonical host and
 normalized path (ambiguous spellings like `/a/../b` are refused). Checked with curl, Node `fetch`
-(envgit sets `NODE_USE_ENV_PROXY=1`), Python `urllib` and git over HTTPS.
+(envgit sets `NODE_USE_ENV_PROXY=1`), Python `urllib` and git over HTTPS. Go (`gh`, GitHub's MCP
+server) on macOS verifies through the system trust daemon, which the sandbox denies, unless
+`SSL_CERT_FILE` is set; srt sets it only when it terminates TLS, so for opaque tunnels envgit points
+it at `/etc/ssl/cert.pem` (roots added to the keychain are not in it). Checked with
+github-mcp-server both ways.
 
 - `network.l7` denies what it does not list for a host; then the first matching `irreversible` net
   rule applies its `action`: `allow` lets it out and marks the step, `deny` refuses it with a 403
@@ -364,6 +375,9 @@ normalized path (ambiguous spellings like `/a/../b` are refused). Checked with c
   combines the two and says which to drop. Without request rules nothing is decrypted or judged and
   `noInspect` changes nothing. On the vm backend the same proxy and gate serve L2 through a vsock
   tunnel (§3.6), during a step only.
+- Known gap: with `requireHostMatch` on, a request to an IPv6-literal address is refused with 421 —
+  srt compares the Host header's address without brackets against Node's `URL.hostname`, which keeps
+  them (and normalizes `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`). Names and IPv4 are unaffected.
 
 ## 5. Milestones
 
@@ -376,7 +390,7 @@ normalized path (ambiguous spellings like `/a/../b` are refused). Checked with c
 
 6. **M5** — close the enforcement gap and generalize the REPL (from the 2026-10-27 review, §7).
    - **One enforcement level for every agent.** Done for Claude Code (whole process in srt), Codex (`http/request` through the gate), and `envgit run` (fs effects from the snapshot diff); on the way, opaque tunnels are now refused (§4). Plan as written: `envgit claude` runs the whole `claude` process under envgit's srt with the gate (sandbox-runtime supports wrapping a process: its Bash, hooks and MCP servers all go through the proxy), with Claude Code's own sandbox off to avoid nesting; Codex's `http/request` is forwarded through the proxy instead of around the gate; `envgit run` on srt records fs effects by diffing the step's snapshot against its parent, as the hooks already do. Acceptance: with one policy, a `git push` to GitHub from Claude Code, Codex and `envgit run` is each stopped at the HTTPS request, not by command-line matching.
-   - **Generic MCP → REPL bridge.** Any MCP server's tools become typed async functions (`await <server>.<tool>(args)`), declarations generated from their JSON Schema; the hardcoded `github` capability goes away. Acceptance: the GitHub MCP server connected, and the M1 demo rerun against it (tools vs. `execute`), not against envgit's own tools.
+   - **Generic MCP → REPL bridge.** Done for stdio servers (§3.3): the hardcoded `github` capability is gone. Accepted: GitHub's MCP server (v2.0.3) runs in the sandbox, and the M1 demo rerun against it gave 1.6× fewer context tokens and 2.4× lower cost, both arms 3/3 correct ([`demo-m1.md`](demo-m1.md#m5-rerun-githubs-mcp-server)). Plan as written: any MCP server's tools become typed async functions (`await <server>.<tool>(args)`), declarations generated from their JSON Schema; the hardcoded `github` capability goes away. Acceptance: the GitHub MCP server connected, and the M1 demo rerun against it (tools vs. `execute`), not against envgit's own tools.
    - **Keep large results in the sandbox by default.** The M1 demo showed the model printing raw data to check its own code, giving back the saving. Three changes: `execute` returns a large result as a handle (`$1: Issue[] (200)`) rather than serializing it, like Jupyter's `Out[n]`; output over a threshold is truncated in the REPL with head, tail and a line saying how to look at a slice; `sample()`, `assert()` and `schema()` are injected so the model can spot-check instead of reading everything. Rerun the demo afterwards to see whether the M1 ratio was the method's ceiling or the model's floor.
    - **CI, x86_64, release.** A GitHub Actions workflow running the Linux srt suite (it passes on Linux today); x86_64 pins for Firecracker, kernel, image and Node; `npm publish` of 0.1.0; a default `policy.yaml` that ships rules for the common irreversible commands (`gh pr create`, `gh release`, `twine upload`, `docker push`, `aws`/`gcloud` writes), so nobody has to know `git-receive-pack`.
 7. **M6** — GUI agents: the VM gets a display (Xvfb, a window manager, `xdotool`/`ydotool`, AT-SPI, VNC/WebRTC), GUI actions are steps, and clicks are resolved through the accessibility tree before injection so `irreversible.gui` rules can gate a Send / Pay / Confirm. Not before M5 ships.
@@ -390,7 +404,7 @@ What holds: the layering (srt is the boundary, `node:vm` only persists, the gate
 What does not, in priority order:
 1. `envgit run` on srt records no fs effects (a `sed -i` step shows `effects: []`); only the hooks path diffs snapshots.
 2. Under Claude Code and Copilot there is recording but no enforcement: only shell rules apply there, and `g=git; $g push` gets past them. The README's "in every case … refused before it runs" overstates this.
-3. The REPL's capabilities are hardcoded (`fs`, `http`, two GitHub calls); the MCP-tools-as-functions design is not implemented, so the M1 demo compares envgit's own tools with themselves.
+3. The REPL's capabilities are hardcoded (`fs`, `http`, two GitHub calls); the MCP-tools-as-functions design is not implemented, so the M1 demo compares envgit's own tools with themselves. (Bridge done in M5; demo rerun against GitHub's MCP server: 1.6× context, 2.4× cost.)
 4. Codex's `http/request` bypasses the gate.
 5. The nested VM on macOS is a demo tier (a warm step ≈ 1–1.5 s against tens of ms on srt); the production shape is bare Firecracker on Linux, and x86_64 is missing. The nested fault cost is hardware, not something to optimize further.
 6. No CI; `lint` script without eslint.

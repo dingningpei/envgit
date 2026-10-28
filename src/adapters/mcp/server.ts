@@ -1,17 +1,18 @@
 /** Exposes the REPL as an MCP server over stdio. See docs/design.md §3.4 */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { buildCapabilities } from '../../repl/capabilities.js'
+import type { DirectTool } from '../../repl/capabilities.js'
 import type { Repl } from '../../repl/session.js'
 import type { Effect } from '../../core/env/backend.js'
-import type { Policy } from '../../core/policy/schema.js'
 import type { Approver, Gate } from '../../core/policy/gate.js'
 
 export type McpMode = 'repl' | 'tools'
 
-export async function serveMcp(repl: Repl, policy: Policy, workdir: string, mode: McpMode = 'repl', gate?: Gate): Promise<void> {
-  const { declarations, globals } = buildCapabilities(policy.capabilities ?? {}, workdir)
+export async function serveMcp(repl: Repl, mode: McpMode = 'repl', gate?: Gate): Promise<void> {
+  // The API comes from the worker itself, inside the sandbox, where the MCP servers run.
+  const { declarations, tools } = await repl.describe()
   const server = new McpServer(
     { name: 'envgit', version: '0.0.1' },
     mode === 'repl'
@@ -21,7 +22,7 @@ export async function serveMcp(repl: Repl, policy: Policy, workdir: string, mode
         }
       : {},
   )
-  if (mode === 'tools') registerDirectTools(server, repl, globals)
+  if (mode === 'tools') registerDirectTools(server, repl, tools)
   else registerExecute(server, repl, declarations)
   const closed = new Promise<void>(resolve => {
     server.server.onclose = resolve
@@ -87,31 +88,22 @@ function describeDenial(e: Effect): string[] {
 }
 
 /**
- * One MCP tool per capability function, the way agents usually get tools today. Each call
- * still runs through the sandboxed REPL, so isolation and the step log match `execute`.
+ * One MCP tool per injected function, the way agents usually get tools today, with the schema it came
+ * with. Each call still runs through the sandboxed REPL, so isolation and the step log match `execute`.
  */
-const DIRECT_TOOLS: Record<string, { fn: string; description: string; params: string[]; schema: Record<string, z.ZodType> }> = {
-  readFile: { fn: 'fs.readFile', description: 'Read a UTF-8 text file.', params: ['path'], schema: { path: z.string() } },
-  writeFile: { fn: 'fs.writeFile', description: 'Write a UTF-8 text file.', params: ['path', 'data'], schema: { path: z.string(), data: z.string() } },
-  readdir: { fn: 'fs.readdir', description: "List a directory. Directory names end with '/'.", params: ['path'], schema: { path: z.string().optional() } },
-  listIssues: {
-    fn: 'github.listIssues',
-    description: 'List issues of a GitHub repository.',
-    params: ['args'],
-    schema: { owner: z.string(), repo: z.string(), state: z.enum(['open', 'closed', 'all']).optional(), per_page: z.number().optional() },
-  },
-  getIssue: { fn: 'github.getIssue', description: 'Get one GitHub issue.', params: ['args'], schema: { owner: z.string(), repo: z.string(), number: z.number() } },
-}
-
-function registerDirectTools(server: McpServer, repl: Repl, globals: Record<string, unknown>) {
-  for (const [name, t] of Object.entries(DIRECT_TOOLS)) {
-    const [ns, fn] = t.fn.split('.') as [string, string]
-    if (typeof (globals[ns] as Record<string, unknown> | undefined)?.[fn] !== 'function') continue
-    server.registerTool(name, { description: t.description, inputSchema: t.schema }, async (input: Record<string, unknown>) => {
-      const args = t.params[0] === 'args' ? [input] : t.params.map(p => input[p]).filter(v => v !== undefined)
-      const code = `const r = await ${t.fn}(...${JSON.stringify(args)}); typeof r === 'string' ? r : JSON.stringify(r, null, 1)`
-      const r = await repl.execute(code)
-      return { content: [{ type: 'text', text: r.error ?? r.output.replace(/\n$/, '') }], isError: Boolean(r.error) }
-    })
-  }
+function registerDirectTools(server: McpServer, repl: Repl, tools: DirectTool[]) {
+  // Raw JSON Schemas pass through as they are, so this bypasses registerTool (which wants zod).
+  server.server.registerCapabilities({ tools: {} })
+  server.server.setRequestHandler(ListToolsRequestSchema, () => ({
+    tools: tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema as { type: 'object' } })),
+  }))
+  server.server.setRequestHandler(CallToolRequestSchema, async req => {
+    const t = tools.find(x => x.name === req.params.name)
+    if (!t) return { content: [{ type: 'text', text: `unknown tool ${req.params.name}` }], isError: true }
+    const input = req.params.arguments ?? {}
+    const args = t.params === 'input' ? [input] : t.params.map(p => input[p]).filter(v => v !== undefined)
+    const code = `const r = await ${t.path[0]}[${JSON.stringify(t.path[1])}](...${JSON.stringify(args)}); typeof r === 'string' ? r : JSON.stringify(r, null, 1)`
+    const r = await repl.execute(code)
+    return { content: [{ type: 'text', text: r.error ?? r.output.replace(/\n$/, '') }], isError: Boolean(r.error) }
+  })
 }

@@ -1,0 +1,80 @@
+[
+  {
+    "corpus": "github",
+    "arm": "tools",
+    "run": 1,
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 18410,
+    "firstRequestContext": 4855,
+    "contextTokens": 28844,
+    "outputTokens": 2651,
+    "costUsd": 0.1639556,
+    "correct": true
+  },
+  {
+    "corpus": "github",
+    "arm": "execute",
+    "run": 1,
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 2572,
+    "firstRequestContext": 4851,
+    "contextTokens": 17479,
+    "outputTokens": 841,
+    "costUsd": 0.072856,
+    "correct": true
+  },
+  {
+    "corpus": "github",
+    "arm": "tools",
+    "run": 2,
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 18410,
+    "firstRequestContext": 4855,
+    "contextTokens": 28777,
+    "outputTokens": 2222,
+    "costUsd": 0.1361898,
+    "correct": true
+  },
+  {
+    "corpus": "github",
+    "arm": "execute",
+    "run": 2,
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 1755,
+    "firstRequestContext": 4853,
+    "contextTokens": 16655,
+    "outputTokens": 793,
+    "costUsd": 0.0496728,
+    "correct": true
+  },
+  {
+    "corpus": "github",
+    "arm": "tools",
+    "run": 3,
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 18410,
+    "firstRequestContext": 4857,
+    "contextTokens": 28761,
+    "outputTokens": 2093,
+    "costUsd": 0.1334506,
+    "correct": true
+  },
+  {
+    "corpus": "github",
+    "arm": "execute",
+    "run": 3,
+    "requests": 5,
+    "toolCalls": 4,
+    "toolResultChars": 1366,
+    "firstRequestContext": 4853,
+    "contextTokens": 28709,
+    "outputTokens": 1008,
+    "costUsd": 0.0563988,
+    "correct": true
+  }
+]
