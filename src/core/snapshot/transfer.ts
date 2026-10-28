@@ -6,6 +6,8 @@
  * An archive may come from anyone, so import trusts nothing in it: names are checked before anything is
  * read, every blob against its hash, every manifest against its id, and every entry path for a way out
  * of the workdir (`..`, a path below a symlink) — restore would write wherever a manifest says.
+ * Unpacking itself relies on tar's defaults, which refuse `..` members and writing through a symlink
+ * the archive planted (checked with macOS's bsdtar and GNU tar 1.35), into a fresh temp directory.
  */
 import { execFile } from 'node:child_process'
 import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
