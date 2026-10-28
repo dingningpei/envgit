@@ -57,6 +57,7 @@ envgit run npm test      # runs in the sandbox and records a step
 envgit log               # the steps so far
 envgit ui --open         # the timeline in a browser
 envgit rewind 0          # back to just after step 0
+envgit export            # the session as one .tar.gz, to attach to an issue; `envgit import` reads it
 ```
 
 ## Use it with your agent

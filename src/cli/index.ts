@@ -44,6 +44,7 @@ import {
 import type { Effect, SnapshotId } from '../core/env/backend.js'
 import { SnapshotStore } from '../core/snapshot/store.js'
 import { enforceCap, parseBytes } from '../core/snapshot/cap.js'
+import { exportSession, importSession } from '../core/snapshot/transfer.js'
 import { ReplSession } from '../repl/session.js'
 import { VmReplSession } from '../repl/vm-session.js'
 import { runWorker } from '../repl/worker.js'
@@ -70,6 +71,10 @@ const help = `envgit — version control for agent execution environments
   envgit rewind <step|base>      restore the workdir to a step (--force drops unrecorded edits)
   envgit fork <step|base> <dir>  materialize a step into a new directory with its own session
   envgit session [new]           print the current session, or start a new one
+  envgit export [session] [-o F] the session (default: current) as one .tar.gz: its log and the
+                                 snapshots it can restore, for a bug report or another machine (srt)
+  envgit import <file>           add an exported session here and make it current; rewind --force
+                                 then puts its files in the workdir
   envgit gc                      delete snapshots and blobs no session refers to
   envgit vm up [--new]           start the nested-Firecracker VM (policy backend: vm), resuming
                                  the current vm session at its head unless --new
@@ -568,6 +573,38 @@ async function sessionCmd(args: string[]): Promise<number> {
   return 0
 }
 
+async function packageVersion(): Promise<string> {
+  const pkg = JSON.parse(await readFile(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8')) as { name: string; version: string }
+  return `${pkg.name} ${pkg.version}`
+}
+
+async function exportCmd(args: string[]): Promise<number> {
+  await requireInit()
+  const o = args.indexOf('-o')
+  const out = o >= 0 ? args[o + 1] : undefined
+  const rest = args.filter((_, i) => i !== o && i !== o + 1)
+  if ((o >= 0 && !out) || rest.length > 1) throw new Error('usage: envgit export [session] [-o file]')
+  const id = rest[0] ?? (await readFile(join(ROOT, 'current'), 'utf8').catch(() => '')).trim()
+  if (!id) throw new Error('no session here yet')
+  const file = resolve(out ?? `envgit-${id}.tar.gz`)
+  const r = await exportSession(ROOT, id, file, await packageVersion())
+  console.error(`envgit: exported session ${id} (${r.snapshots} snapshot(s), ${r.blobs} blob(s)) to ${relative(process.cwd(), file) || file}`)
+  return 0
+}
+
+async function importCmd(args: string[]): Promise<number> {
+  if (args.length !== 1) throw new Error('usage: envgit import <file>')
+  await requireInit()
+  const busy = await busyHolder(ROOT)
+  if (busy !== undefined) throw new Error(`a step is running here (pid ${busy}); wait for it to finish`)
+  const r = await importSession(ROOT, resolve(args[0]!))
+  console.error(
+    `envgit: imported session ${r.session} (${r.steps} step(s), from ${r.header.envgit}); it is now current, at ${r.head === 'base' ? 'base' : `step ${r.head}`}. ` +
+      `The workdir still holds its own files: \`envgit rewind ${r.head} --force\` replaces them with that step's. Its policy is in .envgit/sessions/${r.session}/policy.yaml.`,
+  )
+  return 0
+}
+
 async function gc(): Promise<number> {
   const policy = await requireInit()
   const max = policy.snapshot?.maxBytes
@@ -795,11 +832,9 @@ try {
     case 'init':
       code = await init()
       break
-    case 'doctor': {
-      const pkg = JSON.parse(await readFile(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8')) as { name: string; version: string }
-      code = await runDoctor(undefined, `${pkg.name} ${pkg.version}`)
+    case 'doctor':
+      code = await runDoctor(undefined, await packageVersion())
       break
-    }
     case 'run':
       code = await run(args)
       break
@@ -820,6 +855,12 @@ try {
       break
     case 'gc':
       code = await gc()
+      break
+    case 'export':
+      code = await exportCmd(args)
+      break
+    case 'import':
+      code = await importCmd(args)
       break
     case 'vm':
       code = await vmCmd(args)

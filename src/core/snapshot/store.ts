@@ -65,8 +65,7 @@ export class SnapshotStore {
         entries.push({ path, kind: 'file', mode, size: stat.size, mtimeMs: stat.mtimeMs, hash })
       }
     }
-    // The id covers content only; `at`, sizes and mtimes are a cache for the next snapshot.
-    const id = createHash('sha256').update(entries.map(contentKey).join('\n')).digest('hex') as SnapshotId
+    const id = manifestId(entries)
     if (persist) {
       await mkdir(this.manifests(), { recursive: true })
       await writeFile(join(this.manifests(), `${id}.json`), JSON.stringify({ at, entries } satisfies Manifest), { flag: 'wx' }).catch(ignoreExists)
@@ -195,6 +194,11 @@ export class SnapshotStore {
   }
 }
 
+/** The id covers content only; `at`, sizes and mtimes are a cache for the next snapshot. */
+export function manifestId(entries: Entry[]): SnapshotId {
+  return createHash('sha256').update(entries.map(contentKey).join('\n')).digest('hex') as SnapshotId
+}
+
 function contentKey(e: Entry): string {
   return JSON.stringify(e.kind === 'file' ? [e.path, 'f', e.mode, e.hash] : e.kind === 'dir' ? [e.path, 'd', e.mode] : [e.path, 'l', e.target])
 }
@@ -221,7 +225,7 @@ async function scan(workdir: string, exclude: string[]) {
   return out
 }
 
-function hashFile(abs: string): Promise<string> {
+export function hashFile(abs: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const h = createHash('sha256')
     createReadStream(abs)
