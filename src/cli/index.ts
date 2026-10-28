@@ -19,6 +19,7 @@ import { recordVmStep, reportMirror, withEgress } from '../core/env/vm-step.js'
 import { buildPrebuiltBase, copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmImageStamp, vmSnapshotExists, vmStale, vmUp } from '../core/env/vm.js'
 import { Gate, irreversibleOf, needsInspection } from '../core/policy/gate.js'
 import { ttyApprover } from './approve.js'
+import { demo } from './demo.js'
 import { runDoctor } from './doctor.js'
 import { loadPolicy } from '../core/policy/load.js'
 import type { Policy } from '../core/policy/schema.js'
@@ -58,6 +59,8 @@ const [cmd = 'help', ...args] = process.argv.slice(2)
 const help = `envgit — version control for agent execution environments
 
   envgit doctor          check this machine for what envgit needs, each problem with its fix
+  envgit demo [--keep]   thirty seconds in a temporary directory: a scripted agent's five steps,
+                         a git push refused at the request, a rewind (no API key, no agent)
   envgit init            create .envgit/ and a default policy
   envgit run <cmd...>    run a command in the sandbox, record a step
   envgit mcp [--tools]   serve the sandboxed REPL as an MCP server on stdio
@@ -926,6 +929,9 @@ try {
       break
     case 'doctor':
       code = await runDoctor(undefined, await packageVersion())
+      break
+    case 'demo':
+      code = await demo(args)
       break
     case 'run':
       code = await run(args)
