@@ -46,6 +46,8 @@ if [ "$ARCH" = aarch64 ]; then GOARCH=arm64 DEB=arm64 NODE=arm64; else GOARCH=am
 NODE_TAR=node-v24.21.0-linux-$NODE.tar.xz
 RG_DEB=ripgrep_14.1.0-1_$DEB.deb
 FC=release-v1.17.0-$ARCH
+# A checkout builds its envgit first; an installed package (npm) ships dist/ built.
+envgit_build() { [ ! -d "$REPO/src" ] || (cd "$REPO" && npm run build >/dev/null); }
 sha() { if command -v shasum >/dev/null; then shasum -a 256; else sha256sum; fi; }
 stamp() { (cd "$1" && shift && cat "$@" | sha | cut -c1-16); }
 clone() { if [ "$OS" = Darwin ]; then cp -c "$1" "$2"; else cp --reflink=auto "$1" "$2"; fi; }
@@ -148,7 +150,7 @@ else
   cp "$DL/$NODE_TAR" "$BOOT/node.tar.xz"
   cp "$WORK/rg/usr/bin/rg" "$BOOT/rg"
   envgit() { (cd "$BOOT" && node "$REPO/dist/cli/index.js" "$@"); }
-  (cd "$REPO" && npm run build >/dev/null)  # the bootstrap VM is started by this checkout's envgit
+  envgit_build  # the bootstrap VM is started by this envgit
   envgit init >/dev/null && echo 'backend: vm' > "$BOOT/.envgit/policy.yaml"
   envgit vm up --new
   if envgit run sh -c 'set -e; mkdir -p s/usr/local; tar -xJf node.tar.xz -C s/usr/local --strip-components 1;
@@ -172,7 +174,7 @@ else
   echo "building the prebuilt base snapshot"
   rm -rf "$OUT/base"
   BOOT="$WORK/base-build" && rm -rf "$BOOT" && mkdir -p "$BOOT"
-  (cd "$REPO" && npm run build >/dev/null)
+  envgit_build
   (cd "$BOOT" && node "$REPO/dist/cli/index.js" init >/dev/null && echo 'backend: vm' > .envgit/policy.yaml \
     && node "$REPO/dist/cli/index.js" vm prebuild "$OUT/base.part") || { echo "base snapshot failed" >&2; exit 1; }
   mv "$OUT/base.part" "$OUT/base"

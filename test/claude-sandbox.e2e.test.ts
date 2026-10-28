@@ -38,7 +38,8 @@ out.deployPre = fire('PreToolUse', deploy)
 out.deploy = spawnSync('curl', ['-s', '--noproxy', '', '-X', 'POST', '-w', ' %{http_code}', process.env.BASE + '/deploy'], { encoding: 'utf8' }).stdout
 // The same POST inside a CONNECT tunnel, which the gate cannot see into: refused, not let through.
 out.tunnel = spawnSync('curl', ['-s', '-p', '--noproxy', '', '-X', 'POST', process.env.BASE + '/deploy'], { encoding: 'utf8' }).stdout
-fire('PostToolUse', deploy)
+// curl -f-style failure, as a refused git push is: Claude Code fires PostToolUseFailure, not PostToolUse.
+fire('PostToolUseFailure', { ...deploy, error: 'exit 22' })
 fire('Stop', {})
 console.log(JSON.stringify(out))
 `
@@ -106,6 +107,7 @@ irreversible:
     expect(JSON.parse(steps[0]!.action.input)).toEqual(['echo hi > out.txt'])
     expect(steps[0]!.effects).toContainEqual({ kind: 'fs', op: 'write', path: 'out.txt' })
     const deployStep = steps.find(s => s.agent?.toolUseId === 't2')!
+    expect(deployStep.exitCode).toBe(1)
     expect(deployStep.effects).toContainEqual(
       expect.objectContaining({ kind: 'net', method: 'POST', path: '/deploy', denied: true, irreversible: expect.objectContaining({ decision: 'denied' }) }),
     )

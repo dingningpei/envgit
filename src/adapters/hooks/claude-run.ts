@@ -96,6 +96,8 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
     hooks: {
       PreToolUse: [{ matcher: 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit', hooks: [{ type: 'command', command: o.hookCommand('pre'), timeout: 60 }] }],
       PostToolUse: [{ matcher: 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit', hooks: [{ type: 'command', command: o.hookCommand('post'), timeout: 300 }] }],
+      // A command that fails (a push refused at the gate, say) is a step too, with what it tried.
+      PostToolUseFailure: [{ matcher: 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit', hooks: [{ type: 'command', command: o.hookCommand('post-failed'), timeout: 300 }] }],
       Stop: [{ hooks: [{ type: 'command', command: o.hookCommand('stop'), timeout: 300 }] }],
     },
     // envgit's sandbox already wraps the whole process: Claude Code's own would nest inside it.

@@ -1,6 +1,6 @@
 {
   "name": "envgit",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Version control for agent execution environments",
   "license": "Apache-2.0",
   "repository": {
@@ -21,11 +21,21 @@
     "claude-code"
   ],
   "type": "module",
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "examples/policy.yaml",
+    "scripts/vm/build.sh",
+    "scripts/vm/fetch.sh",
+    "vm/guest",
+    "vm/helper"
+  ],
   "bin": {
     "envgit": "./dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "dev": "tsx src/cli/index.ts",
     "pretest": "npm run build",
     "test": "vitest run",
