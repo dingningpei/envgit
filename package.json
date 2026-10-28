@@ -31,7 +31,7 @@
     "vm/helper"
   ],
   "bin": {
-    "envgit": "./dist/cli/index.js"
+    "envgit": "dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
