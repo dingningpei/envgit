@@ -94,6 +94,25 @@ Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox 
 - Each `execute` is one Step → one snapshot. On the vm backend the worker runs inside the guest and
   is part of that snapshot, so `rewind` restores REPL variables too (§3.6); on srt it resets them.
 - Effects for a REPL step are recorded by the injected capability wrappers (files read/written, hosts contacted, denials), since the macOS sandbox violation log drops events for long-lived processes; the backend's violation log is a best-effort supplement. On Linux srt hides a read-denied directory under an empty tmpfs instead of refusing the read, so such reads come back empty and no denial is recorded; on macOS Seatbelt refuses them and the step records `denied`.
+- **Data in, data out** (M7; planned 2026-10-28, before the code). Each `execute` step records
+  `data: { in, out }` in bytes, the audit signal for a conclusion drawn from data the model never saw:
+  - `in` is what the capabilities brought into the REPL during the step: `fs.readFile` / `readdir`
+    results, `fetch` response bodies, and each MCP tool result as the server sent it (its `result`,
+    serialized). Counted in the worker next to `onEffect`, so on the vm backend the guest's worker
+    counts and the number comes back in the reply like the effects. To count a `fetch` body the
+    wrapper reads it whole and hands the code a `Response` over those bytes: in the REPL a `fetch` is
+    buffered, not streamed. What a capability writes is not `in`; what an MCP server or a child
+    process reads on its own is not seen, only what reaches the REPL.
+  - `out` is what went back to the model: the cell's output and error text after handles and the cut
+    (above), so a `$n` handle counts as its one line. envgit's own notices (a rewind's) are not.
+  - Flag: `in ≥ 64 KiB` and `in ≥ 1000 × out`. `log` shows `in 290K out 312` on repl steps and marks
+    a flagged one (`look: in/out 930×`); the UI shows both numbers on the step and the same mark.
+  - Why these numbers: the M5 rerun's 0/3 on `src` (§5 M5, demo-m1) read ~290 KB and answered in a
+    few hundred bytes — it would be flagged. So would a correct answer of the same shape: the flag
+    says "a conclusion came from data that never reached the context", a prompt for a person to look,
+    not a verdict. envgit does not judge the answer or change what the model does about it.
+  - Not on `exec`, `fs` or hook steps: a command's reads are not observable (srt reports denials,
+    not reads), and there the agent sees the whole output anyway.
 - No shell-string API by default; typed command capabilities instead.
 
 ### 3.4 Adapters (`src/adapters`)
