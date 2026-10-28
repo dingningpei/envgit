@@ -43,7 +43,7 @@ Sandboxes already isolate well: Seatbelt, bubblewrap, Firecracker. envgit adds w
 It needs Node 22 or newer, and macOS or Linux. On Linux the sandbox also needs `bubblewrap`, `socat` and `ripgrep`.
 
 ```bash
-npm install -g agent-envgit   # the command is `envgit`
+npm install -g agent-envgit   # the command is `envgit` (npm would not take `envgit`: too close to an existing `env-git`)
 ```
 
 Or from source: `git clone https://github.com/dingningpei/envgit.git && cd envgit && npm install && npm run build && npm link`.
@@ -150,7 +150,7 @@ What works today:
 - the Codex, Claude Code and Copilot CLI integrations, checked in real sessions;
 - the timeline UI.
 
-Known gaps (see [design §7](docs/design.md) for the full review and [§5](docs/design.md) for what is next):
+Known gaps (see [design §7](docs/design.md) for the reviews and [§5](docs/design.md) for what is next, M7):
 - The VM backend on x86_64 Linux has been checked on one machine (WSL2 with nested KVM), not on bare metal or in CI.
 - The Codex integration relies on `codex exec-server`, which Codex marks as experimental. It was written against Codex 0.162.1.
 - Under Copilot CLI, the agent runs its own tools outside envgit's sandbox. envgit can judge shell command lines there, but not individual HTTP requests — so there it records rather than enforces.
