@@ -24,10 +24,14 @@ capabilities:            # what the REPL (`envgit mcp`) exposes as functions
 # commands of an `sh -c` script; quoting, subshells or variables get past them, which is why the net
 # rule is the one that enforces.
 irreversible:
-  - net: { host: "github.com", method: POST, path: "/**/git-receive-pack" }   # git push over HTTPS
-  - net: { host: "api.github.com", method: POST, path: "/repos/*/*/issues" }
-  - net: { host: "registry.npmjs.org", method: PUT }                          # npm publish
-  - shell: ["git push", "npm publish"]
+  # Your own rules first: the first rule that matches decides. For example, to let pushes to one repo go
+  # without asking:
+  # - net: { host: "github.com", method: POST, path: "/me/scratch.git/git-receive-pack" }
+  #   action: allow
+  # envgit's stock rules: git push over HTTPS to any host; npm, PyPI and crates.io publishing; container
+  # image pushes; GitHub and GitLab REST writes; and the matching command lines (src/core/policy/presets.ts).
+  # `action: deny` on this line refuses them all instead of asking (unattended runs).
+  - preset: default
 # Snapshots are fs-level on the srt backend. Uncomment to leave paths out of them
 # (an unchanged tree costs one stat per file, so large dirs are usually fine).
 # snapshot:

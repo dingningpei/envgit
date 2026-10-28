@@ -85,11 +85,11 @@ network:
   allow: ["api.github.com:443", "registry.npmjs.org"]
   l7:
     api.github.com: { methods: [GET] }          # everything else to this host is refused
-irreversible:                                   # what rewind cannot undo
-  - net: { host: "github.com", method: POST, path: "/**/git-receive-pack" }   # git push over HTTPS
-  - net: { host: "registry.npmjs.org", method: PUT }                          # npm publish
-  - shell: ["git push", "npm publish"]
-    action: deny                                # or ask (the default), or allow (just mark the step)
+irreversible:                                   # what rewind cannot undo; first match wins
+  - net: { host: "github.com", method: POST, path: "/me/scratch.git/git-receive-pack" }
+    action: allow                               # or ask (the default), or deny
+  - preset: default                             # stock rules: git push, npm/PyPI/crates publish, image
+                                                # pushes, GitHub/GitLab API writes, and their commands
 mcp:                                            # MCP servers whose tools become REPL functions
   github:
     command: github-mcp-server

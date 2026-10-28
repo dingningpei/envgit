@@ -6,7 +6,7 @@
  */
 import type { FilterRequestCallback, RequestDecision } from '@anthropic-ai/sandbox-runtime'
 import type { Effect } from '../env/backend.js'
-import type { IrreversibleAction, Policy } from './schema.js'
+import type { IrreversibleAction, NetRule, Policy } from './schema.js'
 
 export interface NetRequest {
   method: string
@@ -43,8 +43,9 @@ function hostMatches(pattern: string, host: string, port: number): boolean {
   return glob(h!, 'host').test(host) && (p === undefined || Number(p) === port)
 }
 
-export function netRuleLabel(r: { host: string; method?: string; path?: string }): string {
-  return ['net', r.method?.toUpperCase() ?? '*', r.host, r.path ?? '**'].join(' ')
+export function netRuleLabel(r: NetRule): string {
+  const any = (v: string | string[] | undefined, all: string) => (v === undefined ? all : [v].flat().join('|'))
+  return ['net', any(r.method, '*').toUpperCase(), r.host, any(r.path, '**')].join(' ')
 }
 
 export function judgeNet(policy: Policy, req: NetRequest): GateVerdict {
@@ -59,9 +60,9 @@ export function judgeNet(policy: Policy, req: NetRequest): GateVerdict {
     if (!('net' in rule)) continue
     const n = rule.net
     if (!hostMatches(n.host, req.host, req.port)) continue
-    if (n.method && n.method.toUpperCase() !== method) continue
-    if (n.path && !glob(n.path, 'path').test(req.path)) continue
-    return { action: rule.action ?? 'ask', rule: netRuleLabel(n) }
+    if (n.method && ![n.method].flat().some(m => m.toUpperCase() === method)) continue
+    if (n.path && ![n.path].flat().some(p => glob(p, 'path').test(req.path))) continue
+    return { action: rule.action ?? 'ask', rule: rule.name ?? netRuleLabel(n) }
   }
   return { action: 'pass' }
 }

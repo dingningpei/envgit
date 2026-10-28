@@ -67,11 +67,12 @@ capabilities:            # what the REPL exposes as functions
   github: [list_issues, get_issue]   # an MCP server below; a list keeps only those tools
 mcp:                     # MCP servers whose tools become REPL functions (§3.3)
   github: { command: github-mcp-server, args: [stdio, --read-only], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" } }
-irreversible:            # gated (§4): ask (default) / deny / allow, always logged red
-  - net: { host: "github.com", method: POST, path: "/**/git-receive-pack" }   # git push
-  - net: { host: "registry.npmjs.org", method: PUT }                          # npm publish
-    action: deny
-  - shell: ["git push", "npm publish"]
+irreversible:            # gated (§4): ask (default) / deny / allow, always logged red; first match wins
+  - net: { host: "github.com", method: POST, path: "/me/scratch.git/git-receive-pack" }
+    action: allow        # before the preset, so it overrides it
+  - net: { host: "deploy.example.com", method: [POST, PUT], path: ["/v1/releases", "/v1/releases/**"] }
+    name: "release"      # the label in messages and the log
+  - preset: default      # envgit's stock rules, expanded here (`action: deny` would refuse them all)
 ```
 
 Compiles to: srt settings, Codex `config.toml` sandbox section, Copilot sandbox settings, and the REPL's injected globals. Enforcement is at the **effect** layer (syscalls, proxy), never by parsing agent code.
@@ -362,6 +363,18 @@ github-mcp-server both ways.
 - Each judged request is a `net` effect on the step with `irreversible: { rule, decision }`; a step
   where an irreversible request actually went out gets the step-level `irreversible` marker that
   `log` shows and `rewind` warns about.
+- **Stock rules** (`- preset: default`, `src/core/policy/presets.ts`), expanded in place by the loader
+  so the order stays visible and a rule written before the line overrides it; `envgit init` writes
+  it, and a policy without the line has none. Net: `git push` over smart HTTP to any host
+  (`POST /**/git-receive-pack`), npm `PUT`/`DELETE`, PyPI upload, crates.io publish/yank, container
+  image pushes on any OCI registry (`PUT /v2/**/manifests/*`), GitHub REST writes (`/repos`, `/orgs`,
+  `/user`, `/gists`, `/projects`, `/teams`) and GitLab REST writes. Shell: `git push`,
+  `npm|pnpm|yarn npm publish`, `npm unpublish`, `cargo publish`, `twine upload`, `docker push`,
+  `gh pr merge`, `gh release create`, `terraform apply|destroy`. Not covered: GraphQL mutations
+  (`api.github.com/graphql` is a POST for reads too, so GitHub's MCP server would be asked on every
+  read, and rules do not see bodies); `git push` over SSH and `docker push` (the daemon is outside the
+  sandbox), which only the shell rules see. Cloud CLIs (`aws`, `gcloud`) are left to the policy's
+  author: their writes are not one path pattern.
 - Shell rules are judged the same way before the command starts (a denied one never runs). They see
   the command line and the simple commands of an `sh -c` script, so a variable or a subshell gets past
   them — the net rule is the enforcement, the shell rule is an early, readable stop.
@@ -396,7 +409,7 @@ github-mcp-server both ways.
    - **One enforcement level for every agent.** Done for Claude Code (whole process in srt), Codex (`http/request` through the gate), and `envgit run` (fs effects from the snapshot diff); on the way, opaque tunnels are now refused (§4). Plan as written: `envgit claude` runs the whole `claude` process under envgit's srt with the gate (sandbox-runtime supports wrapping a process: its Bash, hooks and MCP servers all go through the proxy), with Claude Code's own sandbox off to avoid nesting; Codex's `http/request` is forwarded through the proxy instead of around the gate; `envgit run` on srt records fs effects by diffing the step's snapshot against its parent, as the hooks already do. Acceptance: with one policy, a `git push` to GitHub from Claude Code, Codex and `envgit run` is each stopped at the HTTPS request, not by command-line matching.
    - **Generic MCP → REPL bridge.** Done for stdio servers (§3.3): the hardcoded `github` capability is gone. Accepted: GitHub's MCP server (v2.0.3) runs in the sandbox, and the M1 demo rerun against it gave 1.6× fewer context tokens and 2.4× lower cost, both arms 3/3 correct ([`demo-m1.md`](demo-m1.md#m5-rerun-githubs-mcp-server)). Plan as written: any MCP server's tools become typed async functions (`await <server>.<tool>(args)`), declarations generated from their JSON Schema; the hardcoded `github` capability goes away. Acceptance: the GitHub MCP server connected, and the M1 demo rerun against it (tools vs. `execute`), not against envgit's own tools.
    - **Keep large results in the sandbox by default.** Done (§3.3): handles for arrays and objects over 4,000 characters, output cut at 40,000, `sample`/`schema`/`assert`. Rerun ([`demo-m1.md`](demo-m1.md#m5-rerun-results-kept-in-the-sandbox)): no run returned a large array or object, so handles never fired; the cut kept the large corpus's habit of printing every file in check (3 requests instead of 7, 3/3); on the grown `src` corpus `execute` was 19× smaller and 10× cheaper but 0/3, its regex taking a `require('node:…')` inside a template string for an import that the tools arm, reading every file, did not. Plan as written: the M1 demo showed the model printing raw data to check its own code, giving back the saving. Three changes: `execute` returns a large result as a handle (`$1: Issue[] (200)`) rather than serializing it, like Jupyter's `Out[n]`; output over a threshold is truncated in the REPL with head, tail and a line saying how to look at a slice; `sample()`, `assert()` and `schema()` are injected so the model can spot-check instead of reading everything. Rerun the demo afterwards to see whether the M1 ratio was the method's ceiling or the model's floor.
-   - **CI, x86_64, release.** A GitHub Actions workflow running the Linux srt suite (it passes on Linux today); x86_64 pins for Firecracker, kernel, image and Node; `npm publish` of 0.1.0; a default `policy.yaml` that ships rules for the common irreversible commands (`gh pr create`, `gh release`, `twine upload`, `docker push`, `aws`/`gcloud` writes), so nobody has to know `git-receive-pack`.
+   - **CI, x86_64, release.** A GitHub Actions workflow running the Linux srt suite (it passes on Linux today); x86_64 pins for Firecracker, kernel, image and Node; `npm publish` of 0.1.0; a default `policy.yaml` that ships rules for the common irreversible commands, so nobody has to know `git-receive-pack` — done: `- preset: default` (§4), checked against a real `git push` to a local smart-HTTP remote, stopped at the request even when the command line hides it.
 7. **M6** — GUI agents: the VM gets a display (Xvfb, a window manager, `xdotool`/`ydotool`, AT-SPI, VNC/WebRTC), GUI actions are steps, and clicks are resolved through the accessibility tree before injection so `irreversible.gui` rules can gate a Send / Pay / Confirm. Not before M5 ships.
 
 ## 7. Review, 2026-10-27
@@ -412,7 +425,7 @@ What does not, in priority order:
 4. Codex's `http/request` bypasses the gate.
 5. The nested VM on macOS is a demo tier (a warm step ≈ 1–1.5 s against tens of ms on srt); the production shape is bare Firecracker on Linux, and x86_64 is missing. The nested fault cost is hardware, not something to optimize further.
 6. No CI; `lint` script without eslint.
-7. Default policy needs a stock set of irreversible rules; generated files with machine paths (`demo/results`, `.github/hooks/envgit.json`) must stay out of commits.
+7. Default policy needs a stock set of irreversible rules (done in M5: `preset: default`); generated files with machine paths (`demo/results`, `.github/hooks/envgit.json`) must stay out of commits.
 
 M5 above is the answer to 1–4 and 6–7; M6 is where GUI work starts.
 

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { parse } from 'yaml'
 import type { McpServerConfig } from '../mcp/client.js'
+import { PRESETS } from './presets.js'
 import type { Policy } from './schema.js'
 
 export async function loadPolicy(path: string): Promise<Policy> {
@@ -14,6 +15,17 @@ export async function loadPolicy(path: string): Promise<Policy> {
     if (rule.action !== undefined && !['ask', 'deny', 'allow'].includes(rule.action)) {
       throw new Error(`${path}: irreversible rule action must be ask, deny or allow, got ${JSON.stringify(rule.action)}`)
     }
+  }
+  if (policy.irreversible) {
+    // Expanded here, in place, so every consumer sees one flat list in match order.
+    policy.irreversible = policy.irreversible.flatMap(rule => {
+      if (!('preset' in rule)) return [rule]
+      const rules = PRESETS[rule.preset]
+      if (!rules) throw new Error(`${path}: irreversible preset ${JSON.stringify(rule.preset)} does not exist (there is: ${Object.keys(PRESETS).join(', ')})`)
+      return rule.action ? rules.map(r => ({ ...r, action: rule.action })) : rules
+    })
+  }
+  for (const rule of policy.irreversible ?? []) {
     if (!('net' in rule) && !('shell' in rule)) throw new Error(`${path}: irreversible rule needs net or shell: ${JSON.stringify(rule)}`)
   }
   for (const [name, server] of Object.entries(policy.mcp ?? {})) {

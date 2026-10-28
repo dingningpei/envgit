@@ -26,6 +26,7 @@ export interface Policy {
    * sandbox, started by the REPL worker; `${VAR}` in `env` comes from envgit's environment.
    */
   mcp?: Record<string, McpServerConfig>
+  /** Gated actions, first match wins; `- preset: default` adds envgit's stock rules at that point. */
   irreversible?: IrreversibleRule[]
   /**
    * `exclude`: workdir paths (prefixes) left out of snapshots (`.envgit` always is).
@@ -37,6 +38,21 @@ export interface Policy {
 /** `ask` (default) a person, `deny`, or `allow` and just mark the step. */
 export type IrreversibleAction = 'ask' | 'deny' | 'allow'
 
+/**
+ * `name` labels the rule in messages and the step log. `{ preset }` is expanded by the loader, its
+ * `action` (if set) replacing the stock rules' `ask`.
+ */
 export type IrreversibleRule =
-  | { net: { host: string; method?: string; path?: string }; action?: IrreversibleAction }
-  | { shell: string[]; action?: IrreversibleAction }
+  | { net: NetRule; action?: IrreversibleAction; name?: string }
+  | { shell: string[]; action?: IrreversibleAction; name?: string }
+  | { preset: string; action?: IrreversibleAction }
+
+/** One host (glob, optional `:port`); any of `method`; any of `path` (`*` one segment, `**` any). */
+export interface NetRule {
+  host: string
+  method?: string | string[]
+  path?: string | string[]
+}
+
+/** What the gate sees once presets are expanded. */
+export type ConcreteRule = Exclude<IrreversibleRule, { preset: string }>

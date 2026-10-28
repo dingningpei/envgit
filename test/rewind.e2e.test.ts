@@ -87,10 +87,10 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
   })
 
   it('warns about irreversible steps it rewinds over', async () => {
-    // The default policy asks before `git push`; with no terminal here that would deny, so allow it.
+    // The default policy asks before `git push` (its preset); with no terminal here that would deny, so allow it.
     const policyPath = join(dir, '.envgit/policy.yaml')
     const policy = await readFile(policyPath, 'utf8')
-    await writeFile(policyPath, policy.replace('- shell: ["git push", "npm publish"]', '- shell: ["git push", "npm publish"]\n    action: allow'))
+    await writeFile(policyPath, policy.replace('- preset: default', '- preset: default\n    action: allow'))
     await envgit(dir, 'run', 'git', 'push')
     const r = await envgit(dir, 'rewind', 'base', '--force')
     expect(r.stderr).toMatch(/step \d+ cannot be undone \(shell: git push\)/)

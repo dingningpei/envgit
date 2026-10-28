@@ -37,6 +37,15 @@ describe('judgeNet', () => {
     expect(judgeNet(p, req('POST', 'x', '/repos/a/b/issues')).action).toBe('pass')
   })
 
+  it('takes any of several methods or paths', () => {
+    const p: Policy = { irreversible: [{ net: { host: 'x', method: ['put', 'DELETE'], path: ['/a/**', '/b'] }, name: 'writes' }] }
+    expect(judgeNet(p, req('PUT', 'x', '/a/1/2'))).toEqual({ action: 'ask', rule: 'writes' })
+    expect(judgeNet(p, req('DELETE', 'x', '/b')).action).toBe('ask')
+    expect(judgeNet(p, req('POST', 'x', '/b')).action).toBe('pass')
+    expect(judgeNet(p, req('PUT', 'x', '/c')).action).toBe('pass')
+    expect(judgeNet({ irreversible: [{ net: { host: 'x', method: ['PUT', 'DELETE'], path: ['/a/**', '/b'] } }] }, req('PUT', 'x', '/b'))).toMatchObject({ rule: 'net PUT|DELETE x /a/**|/b' })
+  })
+
   it('knows when inspection is needed', () => {
     expect(needsInspection(policy)).toBe(true)
     expect(needsInspection({ irreversible: [{ shell: ['x'] }] })).toBe(false)
