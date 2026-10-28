@@ -2,6 +2,7 @@
 import { inspect, types } from 'node:util'
 import vm from 'node:vm'
 import { parse, type Node, type Pattern, type Program } from 'acorn'
+import { AssertionError, assert, sample, schema, summarize } from './inspect.js'
 
 export interface ExecuteResult {
   output: string
@@ -9,16 +10,33 @@ export interface ExecuteResult {
 }
 
 export interface Engine {
-  execute(code: string): Promise<ExecuteResult>
+  execute(code: string, opts?: { raw?: boolean }): Promise<ExecuteResult>
 }
 
-const MAX_OUTPUT = 64 * 1024
+/**
+ * A returned array or object whose printout is longer than this stays in the context as `$1`, `$2`, …
+ * and comes back as its type: a page of 150 trimmed GitHub issues prints ~18k characters. A string is
+ * text the code made to be read (often the answer itself), so it is printed.
+ */
+export const HANDLE_LIMIT = 4000
+/**
+ * Printed output beyond this is cut in the middle, under the ~65k characters at which Claude Code
+ * replaces a tool result with a file the model cannot read, and above a ~20k-character answer the demo's
+ * large corpus prints (docs/demo-m1.md).
+ */
+export const OUTPUT_LIMIT = 40_000
+const TAIL = 5000
+/** Raw cells (`envgit mcp --tools`, a tool result as the server gave it) keep only this cap. */
+const RAW_LIMIT = 1 << 20
 
 // node:vm is not a security boundary; the worker runs under srt, which is.
 export class VmEngine implements Engine {
   private readonly context: vm.Context
-  private out: string[] = []
+  private head = ''
+  private tail = ''
   private size = 0
+  private limit = OUTPUT_LIMIT
+  private handles = 0
 
   constructor(globals: Record<string, unknown>) {
     const print = (...args: unknown[]) => this.print(args)
@@ -31,30 +49,60 @@ export class VmEngine implements Engine {
       URL,
       TextEncoder,
       TextDecoder,
+      sample,
+      schema,
+      assert,
+      AssertionError,
     })
   }
 
-  async execute(code: string): Promise<ExecuteResult> {
-    this.out = []
+  async execute(code: string, opts: { raw?: boolean } = {}): Promise<ExecuteResult> {
+    this.head = this.tail = ''
     this.size = 0
+    this.limit = opts.raw ? RAW_LIMIT : OUTPUT_LIMIT
     try {
       const { hoisted, body } = rewrite(code)
       if (hoisted.length) vm.runInContext(`var ${hoisted.join(', ')};`, this.context)
       const value = await vm.runInContext(`(async () => {\n${body}\n})()`, this.context, { filename: 'repl' })
-      if (value !== undefined) this.print([value])
-      return { output: this.out.join('') }
+      if (value !== undefined) this.result(value, opts.raw)
+      return { output: this.output() }
     } catch (e) {
-      return { output: this.out.join(''), error: types.isNativeError(e) ? `${e.name}: ${e.message}` : inspect(e) }
+      return { output: this.output(), error: types.isNativeError(e) ? `${e.name}: ${e.message}` : inspect(e) }
     }
   }
 
-  private print(args: unknown[]) {
-    if (this.size >= MAX_OUTPUT) return
-    const line = args.map(a => (typeof a === 'string' ? a : inspect(a, { depth: 4 }))).join(' ') + '\n'
-    this.out.push(line.slice(0, MAX_OUTPUT - this.size))
-    this.size += line.length
-    if (this.size >= MAX_OUTPUT) this.out.push('…[output truncated]\n')
+  private result(value: unknown, raw?: boolean) {
+    const text = show(value)
+    if (raw || typeof value !== 'object' || value === null || text.length <= HANDLE_LIMIT) return this.write(text + '\n')
+    const name = `$${++this.handles}`
+    this.context[name] = value
+    this.write(summarize(name, value, text.length) + '\n')
   }
+
+  private print(args: unknown[]) {
+    this.write(args.map(show).join(' ') + '\n')
+  }
+
+  /** Keeps the first `limit - TAIL` and the last `TAIL` characters. */
+  private write(s: string) {
+    this.size += s.length
+    const room = this.limit - TAIL - this.head.length
+    if (room > 0) {
+      this.head += s.slice(0, room)
+      s = s.slice(room)
+    }
+    if (s) this.tail = (this.tail + s).slice(-TAIL)
+  }
+
+  private output(): string {
+    const dropped = this.size - this.head.length - this.tail.length
+    if (dropped <= 0) return this.head + this.tail
+    return `${this.head}\n…[${dropped} characters of output cut here; print less, a slice, or sample(…)]…\n${this.tail}`
+  }
+}
+
+function show(v: unknown): string {
+  return typeof v === 'string' ? v : inspect(v, { depth: 4 })
 }
 
 /**

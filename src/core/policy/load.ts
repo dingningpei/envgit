@@ -18,7 +18,8 @@ export async function loadPolicy(path: string): Promise<Policy> {
   }
   for (const [name, server] of Object.entries(policy.mcp ?? {})) {
     // Each server is a global in the REPL, next to its own.
-    if (!/^[A-Za-z_$][\w$]*$/.test(name) || REPL_GLOBALS.includes(name)) throw new Error(`${path}: mcp server name ${JSON.stringify(name)} must be a JavaScript identifier other than ${REPL_GLOBALS.join(', ')}`)
+    if (!/^[A-Za-z_$][\w$]*$/.test(name) || /^\$\d+$/.test(name) || REPL_GLOBALS.includes(name))
+      throw new Error(`${path}: mcp server name ${JSON.stringify(name)} must be a JavaScript identifier other than $1, $2, … and ${REPL_GLOBALS.join(', ')}`)
     if (typeof server?.command !== 'string') throw new Error(`${path}: mcp.${name} needs a command`)
   }
   for (const name of Object.keys(policy.capabilities ?? {})) {
@@ -35,7 +36,7 @@ export async function loadPolicy(path: string): Promise<Policy> {
 /** The REPL's own capabilities; every other name is an MCP server. */
 const BUILT_IN = ['fs', 'http', 'shell']
 /** What the REPL already defines; an MCP server cannot take these names. */
-export const REPL_GLOBALS = ['print', 'console', 'setTimeout', 'clearTimeout', 'URL', 'TextEncoder', 'TextDecoder', 'fs', 'fetch', 'Headers', 'Request', 'Response']
+export const REPL_GLOBALS = ['print', 'console', 'setTimeout', 'clearTimeout', 'URL', 'TextEncoder', 'TextDecoder', 'sample', 'schema', 'assert', 'AssertionError', 'fs', 'fetch', 'Headers', 'Request', 'Response']
 
 /**
  * The MCP servers the REPL starts, with `${VAR}` in their env taken from envgit's environment here:

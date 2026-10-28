@@ -1,0 +1,41 @@
+[
+  {
+    "corpus": "github",
+    "arm": "execute",
+    "run": 1,
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 1948,
+    "firstRequestContext": 5128,
+    "contextTokens": 17718,
+    "outputTokens": 856,
+    "costUsd": 0.0726812,
+    "correct": true
+  },
+  {
+    "corpus": "github",
+    "arm": "execute",
+    "run": 2,
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 1049,
+    "firstRequestContext": 5128,
+    "contextTokens": 16973,
+    "outputTokens": 762,
+    "costUsd": 0.046760800000000005,
+    "correct": true
+  },
+  {
+    "corpus": "github",
+    "arm": "execute",
+    "run": 3,
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 1967,
+    "firstRequestContext": 5128,
+    "contextTokens": 17787,
+    "outputTokens": 919,
+    "costUsd": 0.054080600000000006,
+    "correct": true
+  }
+]

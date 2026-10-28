@@ -5,6 +5,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { z } from 'zod'
 import type { DirectTool } from '../../repl/capabilities.js'
 import type { Repl } from '../../repl/session.js'
+import { RAW } from '../../repl/worker.js'
+import { HANDLE_LIMIT, OUTPUT_LIMIT } from '../../repl/engine.js'
 import type { Effect } from '../../core/env/backend.js'
 import type { Approver, Gate } from '../../core/policy/gate.js'
 
@@ -18,7 +20,7 @@ export async function serveMcp(repl: Repl, mode: McpMode = 'repl', gate?: Gate):
     mode === 'repl'
       ? {
           instructions:
-            'envgit runs JavaScript in a persistent, sandboxed REPL. Prefer one `execute` call that does the whole job over many small tool calls; only what you print() or return comes back.',
+            'envgit runs JavaScript in a persistent, sandboxed REPL. Prefer one `execute` call that does the whole job over many small tool calls; only what you print() or return comes back. Keep data in the sandbox: compute on it, check it with assert(), look at it with sample() and schema(), and print only the answer.',
         }
       : {},
   )
@@ -39,7 +41,7 @@ function registerExecute(server: McpServer, repl: Repl, declarations: string) {
   server.registerTool(
     'execute',
     {
-      description: `Run JavaScript in a persistent sandboxed REPL. Top-level await works; top-level variables survive between calls. Only print() output and the value of the last expression are returned. No require/import/process. Available API:\n\n${declarations}`,
+      description: `Run JavaScript in a persistent sandboxed REPL. Top-level await works; top-level variables survive between calls. Only print() output and the value of the last expression are returned. A returned value longer than ${HANDLE_LIMIT} characters printed stays in the sandbox as $1, $2, … and you get its type; output beyond ${OUTPUT_LIMIT} characters is cut in the middle. No require/import/process. Available API:\n\n${declarations}`,
       inputSchema: { code: z.string().describe('JavaScript source to run') },
     },
     async ({ code }) => {
@@ -102,7 +104,7 @@ function registerDirectTools(server: McpServer, repl: Repl, tools: DirectTool[])
     if (!t) return { content: [{ type: 'text', text: `unknown tool ${req.params.name}` }], isError: true }
     const input = req.params.arguments ?? {}
     const args = t.params === 'input' ? [input] : t.params.map(p => input[p]).filter(v => v !== undefined)
-    const code = `const r = await ${t.path[0]}[${JSON.stringify(t.path[1])}](...${JSON.stringify(args)}); typeof r === 'string' ? r : JSON.stringify(r, null, 1)`
+    const code = `${RAW}const r = await ${t.path[0]}[${JSON.stringify(t.path[1])}](...${JSON.stringify(args)}); typeof r === 'string' ? r : JSON.stringify(r, null, 1)`
     const r = await repl.execute(code)
     return { content: [{ type: 'text', text: r.error ?? r.output.replace(/\n$/, '') }], isError: Boolean(r.error) }
   })

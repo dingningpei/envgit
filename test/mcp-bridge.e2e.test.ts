@@ -36,6 +36,7 @@ server.registerTool('fail', { description: 'Always fails.' }, () => ({ content: 
 server.registerTool('deploy', { description: 'POST /deploy.' }, () =>
   text(execFileSync('curl', ['-s', '--noproxy', '', '-X', 'POST', '-w', ' %{http_code}', process.env.BASE + '/deploy'], { encoding: 'utf8' })))
 server.registerTool('note', { description: 'Write note.txt.' }, () => (writeFileSync('note.txt', 'from the server'), text('ok')))
+server.registerTool('big', { description: 'A large result.' }, () => text(JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ id: i, body: 'b'.repeat(40) })))))
 server.registerTool('hidden', { description: 'Filtered out by the policy.' }, () => text('should not be reachable'))
 await server.connect(new StdioServerTransport())
 `
@@ -76,7 +77,7 @@ irreversible:
     action: deny
 capabilities:
   fs: true
-  stub: [add, get-issue, token, fail, deploy, note]
+  stub: [add, get-issue, token, fail, deploy, note, big]
 mcp:
   stub:
     command: ${JSON.stringify(process.execPath)}
@@ -113,6 +114,9 @@ mcp:
     expect(await execute('await stub.token()')).toBe('tok-123 0')
     expect(await execute('await stub.fail().catch(e => e.message)')).toBe('stub.fail: nope')
     expect(await execute('typeof stub.hidden')).toBe('undefined')
+    // A large result stays in the sandbox; the model gets its type and works on it there.
+    expect(await execute('await stub.big()')).toMatch(/^\$1 = Array\(1000\): \d+ characters [^\n]*Type: \{ id: number; body: string \}\[\]/)
+    expect(await execute('$1.length')).toBe('1000')
   }, 60_000)
 
   it("puts the server inside the sandbox: its irreversible POST is stopped at the gate, its write lands on the step", async () => {
@@ -133,10 +137,12 @@ mcp:
   it('serves the same functions as one tool each with --tools, schemas as the server gave them', async () => {
     const client = await connect('--tools')
     const { tools } = await client.listTools()
-    expect(tools.map(t => t.name).sort()).toEqual(['add', 'deploy', 'fail', 'get-issue', 'note', 'readFile', 'readdir', 'token', 'writeFile'])
+    expect(tools.map(t => t.name).sort()).toEqual(['add', 'big', 'deploy', 'fail', 'get-issue', 'note', 'readFile', 'readdir', 'token', 'writeFile'])
     expect(tools.find(t => t.name === 'get-issue')!.inputSchema).toMatchObject({ properties: { state: { enum: ['open', 'closed'] } }, required: ['number'] })
     expect(text(await client.callTool({ name: 'add', arguments: { a: 2, b: 5 } }))).toBe('7')
     expect(text(await client.callTool({ name: 'get-issue', arguments: { number: 3 } }))).toMatch(/"title": "stub issue"/)
+    // As a tool result, whole: no handle, no cut.
+    expect(JSON.parse(text(await client.callTool({ name: 'big', arguments: {} })))).toHaveLength(1000)
   }, 60_000)
 
   it('refuses to start when a server will not, saying which', async () => {

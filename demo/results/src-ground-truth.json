@@ -1,15 +1,141 @@
 [
   {
+    "file": "src/adapters/codex/exec-server.ts",
+    "builtins": [
+      "child_process",
+      "path",
+      "url"
+    ],
+    "exports": [
+      "CodexExecServer",
+      "CodexExecServerOptions"
+    ]
+  },
+  {
+    "file": "src/adapters/codex/http-helper.ts",
+    "builtins": [],
+    "exports": [
+      "httpHelper"
+    ]
+  },
+  {
+    "file": "src/adapters/codex/runners.ts",
+    "builtins": [
+      "os",
+      "path",
+      "url"
+    ],
+    "exports": [
+      "CommandSpec",
+      "FsOp",
+      "HttpRequest",
+      "HttpResponse",
+      "RunHandle",
+      "Runner",
+      "SrtRunner",
+      "StepFields",
+      "VmRunner"
+    ]
+  },
+  {
+    "file": "src/adapters/codex/serve.ts",
+    "builtins": [
+      "child_process",
+      "crypto"
+    ],
+    "exports": [
+      "runCodexWs",
+      "serveCodexStdio"
+    ]
+  },
+  {
+    "file": "src/adapters/codex/ws.ts",
+    "builtins": [
+      "crypto",
+      "http",
+      "net"
+    ],
+    "exports": [
+      "WsConnection",
+      "listenWs"
+    ]
+  },
+  {
+    "file": "src/adapters/hooks/claude-run.ts",
+    "builtins": [
+      "crypto",
+      "fs/promises",
+      "os",
+      "path"
+    ],
+    "exports": [
+      "CLAUDE_CREDENTIAL_ENV",
+      "CLAUDE_HOSTS",
+      "ClaudeRunOptions",
+      "claudeCredentialMissing",
+      "runClaude"
+    ]
+  },
+  {
+    "file": "src/adapters/hooks/handler.ts",
+    "builtins": [
+      "path"
+    ],
+    "exports": [
+      "HookContext",
+      "HookEvent",
+      "runHook"
+    ]
+  },
+  {
+    "file": "src/adapters/hooks/normalize.ts",
+    "builtins": [],
+    "exports": [
+      "Agent",
+      "COPILOT_WRITERS",
+      "ToolEvent",
+      "changesFiles",
+      "normalize"
+    ]
+  },
+  {
+    "file": "src/adapters/hooks/spool.ts",
+    "builtins": [
+      "crypto",
+      "fs/promises",
+      "path"
+    ],
+    "exports": [
+      "SPOOL_ENV",
+      "SpoolRequest",
+      "relay",
+      "serveSpool"
+    ]
+  },
+  {
     "file": "src/adapters/mcp/server.ts",
     "builtins": [],
     "exports": [
       "McpMode",
+      "askThroughClient",
       "serveMcp"
+    ]
+  },
+  {
+    "file": "src/cli/approve.ts",
+    "builtins": [
+      "fs",
+      "readline/promises",
+      "tty"
+    ],
+    "exports": [
+      "ttyApprover"
     ]
   },
   {
     "file": "src/cli/index.ts",
     "builtins": [
+      "child_process",
       "fs/promises",
       "path",
       "url"
@@ -30,24 +156,137 @@
     ]
   },
   {
+    "file": "src/core/env/proxied-fetch.ts",
+    "builtins": [
+      "http",
+      "stream"
+    ],
+    "exports": [
+      "proxiedFetch"
+    ]
+  },
+  {
     "file": "src/core/env/srt.ts",
     "builtins": [
       "child_process",
       "crypto",
+      "fs",
       "os"
     ],
     "exports": [
       "SrtBackend",
+      "notGated",
       "shellQuote",
       "toEffect"
+    ]
+  },
+  {
+    "file": "src/core/env/vm-egress.ts",
+    "builtins": [
+      "fs/promises",
+      "net",
+      "path"
+    ],
+    "exports": [
+      "Egress",
+      "L2_NET_ENV",
+      "startEgress"
+    ]
+  },
+  {
+    "file": "src/core/env/vm-step.ts",
+    "builtins": [],
+    "exports": [
+      "mirrorEffects",
+      "recordVmStep",
+      "reportMirror",
+      "withEgress"
+    ]
+  },
+  {
+    "file": "src/core/env/vm.ts",
+    "builtins": [
+      "child_process",
+      "crypto",
+      "fs/promises",
+      "net",
+      "os",
+      "path",
+      "util"
+    ],
+    "exports": [
+      "GuestEntry",
+      "MirrorResult",
+      "VmBackend",
+      "VmClient",
+      "VmMsg",
+      "VmPaths",
+      "WARM_ARGV",
+      "applyMirror",
+      "buildPrebuiltBase",
+      "copyVmSnapshots",
+      "foldVmDiff",
+      "gcVmSnapshots",
+      "mirrorKeys",
+      "recoverVmFolds",
+      "tarFrom",
+      "vmBuildStamp",
+      "vmDir",
+      "vmDown",
+      "vmImageStamp",
+      "vmPaths",
+      "vmProxySocket",
+      "vmSnapshotBytes",
+      "vmSnapshotClosure",
+      "vmSnapshotExists",
+      "vmSocket",
+      "vmStale",
+      "vmUp"
+    ]
+  },
+  {
+    "file": "src/core/mcp/client.ts",
+    "builtins": [
+      "child_process",
+      "readline"
+    ],
+    "exports": [
+      "McpClient",
+      "McpServerConfig",
+      "McpTool"
+    ]
+  },
+  {
+    "file": "src/core/mcp/declare.ts",
+    "builtins": [],
+    "exports": [
+      "declareServer",
+      "key"
     ]
   },
   {
     "file": "src/core/policy/compile.ts",
     "builtins": [],
     "exports": [
-      "compileSrt",
-      "matchIrreversible"
+      "SrtExtra",
+      "compileSrt"
+    ]
+  },
+  {
+    "file": "src/core/policy/gate.ts",
+    "builtins": [],
+    "exports": [
+      "ApprovalRequest",
+      "Approver",
+      "Gate",
+      "GateVerdict",
+      "NetRequest",
+      "irreversibleOf",
+      "judgeNet",
+      "judgeShell",
+      "needsInspection",
+      "netRuleLabel",
+      "noApprover"
     ]
   },
   {
@@ -56,15 +295,47 @@
       "fs/promises"
     ],
     "exports": [
-      "loadPolicy"
+      "REPL_GLOBALS",
+      "loadPolicy",
+      "mcpServers"
     ]
   },
   {
     "file": "src/core/policy/schema.ts",
     "builtins": [],
     "exports": [
+      "IrreversibleAction",
       "IrreversibleRule",
       "Policy"
+    ]
+  },
+  {
+    "file": "src/core/snapshot/cap.ts",
+    "builtins": [
+      "fs/promises",
+      "path"
+    ],
+    "exports": [
+      "CapOptions",
+      "CapResult",
+      "KEEP_RECENT",
+      "describe",
+      "enforceCap",
+      "parseBytes",
+      "snapshotBytes"
+    ]
+  },
+  {
+    "file": "src/core/snapshot/lock.ts",
+    "builtins": [
+      "child_process",
+      "fs/promises",
+      "path"
+    ],
+    "exports": [
+      "acquireBusy",
+      "busyHolder",
+      "releaseBusy"
     ]
   },
   {
@@ -75,13 +346,41 @@
       "path"
     ],
     "exports": [
+      "OpenSession",
       "Session",
       "SessionMeta",
+      "Snapshotting",
       "Step",
+      "StepRef",
+      "activeChain",
+      "addPruned",
       "appendStep",
+      "createSession",
+      "ensureBase",
+      "liveSnapshots",
       "nextStepIndex",
       "openSession",
-      "readSteps"
+      "readHead",
+      "readPruned",
+      "readSteps",
+      "recordStep",
+      "snapshotOf",
+      "writeHead",
+      "writeMeta"
+    ]
+  },
+  {
+    "file": "src/core/snapshot/store.ts",
+    "builtins": [
+      "crypto",
+      "fs",
+      "fs/promises",
+      "path"
+    ],
+    "exports": [
+      "Entry",
+      "Manifest",
+      "SnapshotStore"
     ]
   },
   {
@@ -92,6 +391,7 @@
     ],
     "exports": [
       "Capabilities",
+      "DirectTool",
       "buildCapabilities"
     ]
   },
@@ -104,19 +404,49 @@
     "exports": [
       "Engine",
       "ExecuteResult",
+      "HANDLE_LIMIT",
+      "OUTPUT_LIMIT",
       "VmEngine",
       "rewrite"
+    ]
+  },
+  {
+    "file": "src/repl/inspect.ts",
+    "builtins": [],
+    "exports": [
+      "AssertionError",
+      "assert",
+      "sample",
+      "schema",
+      "summarize"
     ]
   },
   {
     "file": "src/repl/session.ts",
     "builtins": [
       "child_process",
+      "fs/promises",
+      "path",
       "readline"
     ],
     "exports": [
+      "Repl",
       "ReplResult",
       "ReplSession"
+    ]
+  },
+  {
+    "file": "src/repl/vm-session.ts",
+    "builtins": [
+      "crypto",
+      "fs/promises",
+      "module",
+      "os",
+      "path",
+      "url"
+    ],
+    "exports": [
+      "VmReplSession"
     ]
   },
   {
@@ -126,9 +456,43 @@
     ],
     "exports": [
       "CAPABILITIES_ENV",
+      "DESCRIBE",
+      "Description",
+      "MCP_ENV",
+      "RAW",
       "WorkerMessage",
       "WorkerRequest",
       "runWorker"
+    ]
+  },
+  {
+    "file": "src/ui/diff.ts",
+    "builtins": [],
+    "exports": [
+      "Hunk",
+      "unifiedDiff"
+    ]
+  },
+  {
+    "file": "src/ui/page.ts",
+    "builtins": [],
+    "exports": [
+      "PAGE"
+    ]
+  },
+  {
+    "file": "src/ui/server.ts",
+    "builtins": [
+      "child_process",
+      "crypto",
+      "fs/promises",
+      "http",
+      "net",
+      "path"
+    ],
+    "exports": [
+      "UiOptions",
+      "serveUi"
     ]
   }
 ]

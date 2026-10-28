@@ -1,0 +1,14 @@
+[
+  {
+    "corpus": "github",
+    "arm": "execute",
+    "correct": "3/3",
+    "requests": 3,
+    "toolCalls": 2,
+    "toolResultChars": 1948,
+    "firstRequestContext": 5128,
+    "contextTokens": 17718,
+    "outputTokens": 856,
+    "costUsd": 0.054080600000000006
+  }
+]

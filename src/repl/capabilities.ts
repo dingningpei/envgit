@@ -54,7 +54,15 @@ export async function buildCapabilities(
   servers: Record<string, McpServerConfig> = {},
 ): Promise<Capabilities> {
   const globals: Record<string, unknown> = {}
-  const decls = ['declare function print(...values: unknown[]): void']
+  const decls = [
+    'declare function print(...values: unknown[]): void',
+    '/** n items spread across an array, first and last included (or n entries of an object): look at a few, not all. */',
+    'declare function sample<T>(x: T[], n?: number): T[]',
+    '/** The shape of a value as a TypeScript type; array elements merged, keys missing in some marked optional. */',
+    'declare function schema(x: unknown): string',
+    '/** Throws AssertionError(message) when cond is falsy: check a result in code instead of printing it. */',
+    'declare function assert(cond: unknown, message?: string): asserts cond',
+  ]
   const tools: DirectTool[] = []
   const tracedFetch = traceFetch(onEffect)
 

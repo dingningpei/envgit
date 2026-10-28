@@ -27,6 +27,8 @@ export const MCP_ENV = 'ENVGIT_MCP'
  * backend's REPL channel unchanged; not valid JavaScript, so no cell can be mistaken for it.
  */
 export const DESCRIBE = '\0envgit:describe'
+/** Prefix for a cell whose output comes back whole, not as a handle or cut: a tool result for `envgit mcp --tools`. */
+export const RAW = '\0envgit:raw\n'
 
 export async function runWorker(): Promise<void> {
   const caps = JSON.parse(process.env[CAPABILITIES_ENV] ?? '{}') as NonNullable<Policy['capabilities']>
@@ -54,7 +56,8 @@ export async function runWorker(): Promise<void> {
     } else if (req.code === DESCRIBE) {
       send({ id: req.id, output: JSON.stringify({ declarations: built.declarations, tools: built.tools } satisfies Description), effects })
     } else {
-      const result = await engine.execute(req.code)
+      const raw = req.code.startsWith(RAW)
+      const result = await engine.execute(raw ? req.code.slice(RAW.length) : req.code, { raw })
       send({ id: req.id, ...result, effects })
     }
   }

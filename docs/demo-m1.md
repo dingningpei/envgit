@@ -117,3 +117,43 @@ always right.
   the tools arm, at less than half the cost.
 - The same task at 1,500 issues would need 15 pages; the tools arm's history grows with every page,
   `execute`'s does not.
+
+## M5 rerun: results kept in the sandbox
+
+After the M1 runs the REPL changed (design §3.3): a returned array or object over 4,000 characters
+stays in the sandbox as `$1` and comes back as its type, output over 40,000 characters is cut in the
+middle, and `sample()`, `schema()` and `assert()` are injected. The tools arm is unchanged (its
+results come back whole), so only `execute` was rerun, except on `src`, which has grown from 12 files
+(~48 KB) to 37 (~290 KB) since M1 and needed a new tools baseline. The `*-summary.json` files for
+`src` and `srt-dts` now hold these runs.
+
+| Corpus | Arm | Runs | Correct | Requests | Tool calls | Context tokens | Output tokens | Cost |
+|---|---|---|---|---|---|---|---|---|
+| src (37 files) | tools | 3 | 3/3 | 8 | 50 | 362,311 | 10,156 | $1.305 |
+| src (37 files) | execute | 3 | **0/3** | 3 | 2 | 18,721 | 3,449 | $0.131 |
+| srt-dts | execute (M1) | 3 | 3/3 | 7 | 6 | 59,358 | 9,145 | $0.326 |
+| srt-dts | execute | 3 | 3/3 | 3 | 2 | 48,896 | 7,399 | $0.324 |
+| github | tools (above) | 3 | 3/3 | 3 | 2 | 28,777 | 2,222 | $0.136 |
+| github | execute | 3 | 3/3 | 3 | 2 | 17,718 | 856 | $0.054 |
+
+- **`src`: 19× less context, 10× cheaper, and wrong every time.** All three `execute` runs listed
+  `http` as a builtin of `src/adapters/codex/runners.ts`, whose only `node:http` is a
+  `require('node:http')` inside a template string (a helper script it ships to the guest). Each run
+  wrote a regex that also matched `require(…)`, printed the lines its regex treated specially, saw
+  that one, and kept it, without reading the file around it. The tools arm read all 37 files whole
+  and got it right, at ten times the price. Keeping data out of the context also keeps out the context
+  a judgement needs; `assert` and `sample` don't help when the code's rule is the mistake.
+- **`srt-dts`: the model still printed every file**, to check its regexes, as in M1; the 40,000 cut
+  is what kept that from reaching Claude Code's result limit, and it answered from its code, right
+  every time, in 3 requests instead of 7. Context fell 18%; cost stayed the same.
+- **`github`: unchanged.** These runs already returned only the aggregate. They are where the
+  helpers were used: every run called `schema()` on the first page, and two used `assert()`.
+- **Handles were never created.** No run returned a large array or object; the models print or
+  return strings. An earlier rerun, where a returned *string* also became a handle, cost three runs an
+  extra round trip to `print($1)` their own answer, and a 20,000-character cut clipped a ~20k answer;
+  both were changed (strings print, the cut is 40,000) before these runs.
+
+So the answer to M1's question, *ceiling or floor*: on this model the method's saving is limited
+less by the REPL than by what the model chooses to look at. When it prints raw data to check its code,
+the cut caps the cost; when it doesn't look, it can be confidently wrong where the tools arm, which
+must read everything, is not.

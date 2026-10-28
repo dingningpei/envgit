@@ -28,7 +28,7 @@ async function workerBundle(): Promise<{ tar: Buffer; version: string }> {
   const acorn = dirname(dirname(createRequire(import.meta.url).resolve('acorn')))
   const stage = await mkdtemp(join(tmpdir(), 'envgit-worker-'))
   try {
-    for (const f of ['worker.js', 'capabilities.js', 'engine.js']) await cp(join(here, f), join(stage, 'repl', f))
+    for (const f of ['worker.js', 'capabilities.js', 'engine.js', 'inspect.js']) await cp(join(here, f), join(stage, 'repl', f))
     // What capabilities.js imports: the REPL's fetch for plain HTTP through the proxy, the MCP client.
     for (const f of DEPS) await cp(join(here, '..', f), join(stage, f))
     await cp(join(acorn, 'package.json'), join(stage, 'node_modules/acorn/package.json'))
@@ -36,7 +36,7 @@ async function workerBundle(): Promise<{ tar: Buffer; version: string }> {
     await writeFile(join(stage, 'package.json'), '{"type":"module"}\n')
     await writeFile(join(stage, 'worker.mjs'), "import { runWorker } from './repl/worker.js'\nawait runWorker()\n")
     const h = createHash('sha256')
-    for (const f of ['repl/worker.js', 'repl/capabilities.js', 'repl/engine.js', ...DEPS, 'worker.mjs']) h.update(await readFile(join(stage, f)))
+    for (const f of ['repl/worker.js', 'repl/capabilities.js', 'repl/engine.js', 'repl/inspect.js', ...DEPS, 'worker.mjs']) h.update(await readFile(join(stage, f)))
     const version = h.digest('hex').slice(0, 16)
     await writeFile(join(stage, 'VERSION'), version + '\n')
     return { tar: await tarFrom(stage), version }
