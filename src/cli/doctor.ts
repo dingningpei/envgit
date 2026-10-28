@@ -25,6 +25,7 @@ export interface Check {
 export interface Host {
   platform: NodeJS.Platform
   node: string
+  env: NodeJS.ProcessEnv
   /** A command's output (stdout, else stderr), or undefined when it is missing or fails. */
   run(cmd: string, args: string[]): Promise<string | undefined>
   read(path: string): Promise<string | undefined>
@@ -84,6 +85,14 @@ export async function doctor(h: Host): Promise<Check[]> {
     })
   }
 
+  // The host's trust is envgit's: it verifies what the proxy terminates (policies with request rules).
+  if (h.env.NODE_USE_SYSTEM_CA === '1')
+    out.push({
+      status: 'info',
+      what: 'NODE_USE_SYSTEM_CA=1 applies to the HTTPS envgit\'s proxy inspects, not to node inside the sandbox',
+      fix: 'for a policy without request rules, list a corporate CA (PEM) in network.extraCaCertPaths',
+    })
+
   // Agents are optional; a version older than the one tested is worth knowing about.
   for (const [name, cmd, tested, use] of [
     ['Claude Code', 'claude', TESTED.claude, '`envgit claude`'],
@@ -119,6 +128,7 @@ export async function doctor(h: Host): Promise<Check[]> {
 export const realHost: Host = {
   platform: process.platform,
   node: process.version,
+  env: process.env,
   run: (cmd, args) =>
     new Promise(resolve =>
       execFile(cmd, args, { timeout: 10_000 }, (err, stdout, stderr) => resolve(err ? undefined : String(stdout).trim() || String(stderr).trim())),

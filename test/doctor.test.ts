@@ -11,6 +11,7 @@ function host(over: Partial<Host> & { versions?: Record<string, string>; files?:
   return {
     platform: 'darwin',
     node: 'v22.12.0',
+    env: {},
     run: async cmd => versions[cmd],
     read: async p => over.files?.[p],
     usable: async () => true,
@@ -28,6 +29,11 @@ describe('envgit doctor', () => {
     expect(checks.filter(c => c.status === 'fail')).toEqual([])
     expect(find(checks, /Claude Code/)).toMatchObject({ status: 'ok' })
     expect(find(checks, /Copilot CLI not found/)).toMatchObject({ status: 'info' })
+  })
+
+  it('says a host NODE_USE_SYSTEM_CA does not reach the sandbox, and where a corporate CA goes', async () => {
+    expect(find(await doctor(host()), /NODE_USE_SYSTEM_CA/)).toBeUndefined()
+    expect(find(await doctor(host({ env: { NODE_USE_SYSTEM_CA: '1' } })), /NODE_USE_SYSTEM_CA/)).toMatchObject({ status: 'info', fix: expect.stringMatching(/network\.extraCaCertPaths/) })
   })
 
   it('fails an old Node, with the fix', async () => {

@@ -26,6 +26,12 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     sessionDir = join(dir, '.envgit/sessions', id!)
   }, 60_000)
 
+  it("keeps the host's NODE_USE_SYSTEM_CA out of the sandbox, where the system store is not the trust", async () => {
+    const r = await run(process.execPath, [CLI, 'run', 'node', '-e', 'console.log(`[${process.env.NODE_USE_SYSTEM_CA}]`)'], { cwd: dir, env: { ...process.env, NODE_USE_SYSTEM_CA: '1' } })
+    expect(r.stdout).toContain('[undefined]')
+    expect(r.stderr).not.toMatch(/trust settings/)
+  })
+
   it('finishes an interrupted rewind on the next command', async () => {
     const [step0] = await readSteps(sessionDir)
     await writeFile(join(dir, '.envgit/restoring'), JSON.stringify({ session: sessionDir.split('/').pop(), target: 0, snapshot: step0!.snapshot }))

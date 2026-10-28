@@ -437,6 +437,13 @@ github-mcp-server both ways.
   combines the two and says which to drop. Without request rules nothing is decrypted or judged and
   `noInspect` changes nothing. On the vm backend the same proxy and gate serve L2 through a vsock
   tunnel (§3.6), during a step only.
+- Trust in the sandbox is never the host's system store: envgit drops `NODE_USE_SYSTEM_CA` from the
+  sandbox's environment (on macOS that store needs trustd, which Seatbelt denies, and every node process
+  printed the failures). What the proxy terminates is verified in envgit's own process, by the host's
+  trust. Without request rules clients in the sandbox verify upstreams themselves, so
+  `network.extraCaCertPaths` (PEM, e.g. a corporate CA) is added to a bundle of the system's roots,
+  given as `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO`, and to Node as
+  `NODE_EXTRA_CA_CERTS`; an unreadable path is an error, not skipped. srt backend only.
 - Known gap: with `requireHostMatch` on, a request to an IPv6-literal address is refused with 421 —
   srt compares the Host header's address without brackets against Node's `URL.hostname`, which keeps
   them (and normalizes `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`). Names and IPv4 are unaffected.

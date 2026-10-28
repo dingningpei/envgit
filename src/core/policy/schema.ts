@@ -20,6 +20,12 @@ export interface Policy {
      * tell sockets apart, so any entry lets in every socket. `socket` rules below judge these.
      */
     allowUnixSockets?: string[]
+    /**
+     * PEM roots (a corporate CA) the sandbox trusts on top of the system's, for policies without request
+     * rules, where clients in the sandbox verify upstreams themselves. With request rules the proxy
+     * verifies them in envgit's own process, by the host's trust (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS).
+     */
+    extraCaCertPaths?: string[]
   }
   /**
    * What the REPL exposes: `fs`, `http`, and each MCP server below by name (on unless `false`; a list
