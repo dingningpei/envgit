@@ -252,7 +252,7 @@ sparse version, rebuilt from the packed copy);
   guest's clock is wherever its snapshot left it (TLS checks fail otherwise).
 - **Protocol:** one framed protocol on both hops — a 4-byte length + JSON header, optionally followed
   by a byte stream (files, tar).
-- **On Linux (arm64), no nesting:** the same supervisor binary runs on the host as an ordinary
+- **On Linux (arm64, x86_64), no nesting:** the same supervisor binary runs on the host as an ordinary
   process (host mode, chosen when it is not PID 1): `vm up` starts it detached with the paths as
   flags, after checking `/dev/kvm` is usable; it listens on the workdir's unix socket instead of
   vsock, writes snapshots straight to `.envgit/vm/snaps`, and joins L2's egress connections straight
@@ -264,8 +264,12 @@ sparse version, rebuilt from the packed copy);
   dead supervisor does not leave a guest behind. `build.sh` on Linux lays out `envgit-supervisor`
   and `fc/` instead of the Swift helper and L1, builds the Node layer with the host's `mksquashfs`
   (squashfs-tools), and makes its own prebuilt base. The egress proxy is srt's, so the host needs
-  what srt needs on Linux: bubblewrap, socat and ripgrep. x86_64 is not built yet (its Firecracker,
-  kernel, image and Node pins, and a machine to check them on).
+  what srt needs on Linux: bubblewrap, socat and ripgrep. x86_64 has its own pins in `fetch.sh`
+  (Firecracker, the CI kernel — pinned from a download, as its bucket publishes no checksum — the
+  amd64 cloud image, Node, ripgrep). The guest side needs Go and cpio; `build.sh --guest-only x86_64 DIR`
+  makes it on another machine (a Mac, cross-compiling) and `ENVGIT_VM_GUEST_DIR=DIR` builds without
+  them. Checked on an i7-10700K under WSL2 (nested KVM): the full suite with the vm e2e tests passes
+  (120, 16 skipped for Codex), `vm up` ≈ 1.1 s from the prebuilt base, a step ≈ 0.35–0.65 s.
   Tested on a Mac with `scripts/vm/linux-test.sh`, which boots a Linux VM from L1's kernel (it has
   KVM) with the same Ubuntu image and Node layer as root and this repo shared in, and runs the vm
   e2e tests there against a Linux layout (`build.sh --linux-layout`); all pass, egress and
@@ -409,7 +413,7 @@ github-mcp-server both ways.
    - **One enforcement level for every agent.** Done for Claude Code (whole process in srt), Codex (`http/request` through the gate), and `envgit run` (fs effects from the snapshot diff); on the way, opaque tunnels are now refused (§4). Plan as written: `envgit claude` runs the whole `claude` process under envgit's srt with the gate (sandbox-runtime supports wrapping a process: its Bash, hooks and MCP servers all go through the proxy), with Claude Code's own sandbox off to avoid nesting; Codex's `http/request` is forwarded through the proxy instead of around the gate; `envgit run` on srt records fs effects by diffing the step's snapshot against its parent, as the hooks already do. Acceptance: with one policy, a `git push` to GitHub from Claude Code, Codex and `envgit run` is each stopped at the HTTPS request, not by command-line matching.
    - **Generic MCP → REPL bridge.** Done for stdio servers (§3.3): the hardcoded `github` capability is gone. Accepted: GitHub's MCP server (v2.0.3) runs in the sandbox, and the M1 demo rerun against it gave 1.6× fewer context tokens and 2.4× lower cost, both arms 3/3 correct ([`demo-m1.md`](demo-m1.md#m5-rerun-githubs-mcp-server)). Plan as written: any MCP server's tools become typed async functions (`await <server>.<tool>(args)`), declarations generated from their JSON Schema; the hardcoded `github` capability goes away. Acceptance: the GitHub MCP server connected, and the M1 demo rerun against it (tools vs. `execute`), not against envgit's own tools.
    - **Keep large results in the sandbox by default.** Done (§3.3): handles for arrays and objects over 4,000 characters, output cut at 40,000, `sample`/`schema`/`assert`. Rerun ([`demo-m1.md`](demo-m1.md#m5-rerun-results-kept-in-the-sandbox)): no run returned a large array or object, so handles never fired; the cut kept the large corpus's habit of printing every file in check (3 requests instead of 7, 3/3); on the grown `src` corpus `execute` was 19× smaller and 10× cheaper but 0/3, its regex taking a `require('node:…')` inside a template string for an import that the tools arm, reading every file, did not. Plan as written: the M1 demo showed the model printing raw data to check its own code, giving back the saving. Three changes: `execute` returns a large result as a handle (`$1: Issue[] (200)`) rather than serializing it, like Jupyter's `Out[n]`; output over a threshold is truncated in the REPL with head, tail and a line saying how to look at a slice; `sample()`, `assert()` and `schema()` are injected so the model can spot-check instead of reading everything. Rerun the demo afterwards to see whether the M1 ratio was the method's ceiling or the model's floor.
-   - **CI, x86_64, release.** A GitHub Actions workflow running the Linux srt suite (it passes on Linux today); x86_64 pins for Firecracker, kernel, image and Node; `npm publish` of 0.1.0; a default `policy.yaml` that ships rules for the common irreversible commands, so nobody has to know `git-receive-pack` — done: `- preset: default` (§4), checked against a real `git push` to a local smart-HTTP remote, stopped at the request even when the command line hides it.
+   - **CI, x86_64, release.** A GitHub Actions workflow running the Linux srt suite (`.github/workflows/test.yml`: Ubuntu 24.04 x86_64, AppArmor's user-namespace restriction lifted for bubblewrap; its steps pass on a fresh copy on an x86_64 machine, the first hosted run is pending; vm tests need KVM and stay manual); x86_64 pins for Firecracker, kernel, image and Node (done, checked on an x86_64 desktop, §3.6); `npm publish` of 0.1.0; a default `policy.yaml` that ships rules for the common irreversible commands, so nobody has to know `git-receive-pack` — done: `- preset: default` (§4), checked against a real `git push` to a local smart-HTTP remote, stopped at the request even when the command line hides it.
 7. **M6** — GUI agents: the VM gets a display (Xvfb, a window manager, `xdotool`/`ydotool`, AT-SPI, VNC/WebRTC), GUI actions are steps, and clicks are resolved through the accessibility tree before injection so `irreversible.gui` rules can gate a Send / Pay / Confirm. Not before M5 ships.
 
 ## 7. Review, 2026-10-27
@@ -423,7 +427,7 @@ What does not, in priority order:
 2. Under Claude Code and Copilot there is recording but no enforcement: only shell rules apply there, and `g=git; $g push` gets past them. The README's "in every case … refused before it runs" overstates this.
 3. The REPL's capabilities are hardcoded (`fs`, `http`, two GitHub calls); the MCP-tools-as-functions design is not implemented, so the M1 demo compares envgit's own tools with themselves. (Bridge done in M5; demo rerun against GitHub's MCP server: 1.6× context, 2.4× cost.)
 4. Codex's `http/request` bypasses the gate.
-5. The nested VM on macOS is a demo tier (a warm step ≈ 1–1.5 s against tens of ms on srt); the production shape is bare Firecracker on Linux, and x86_64 is missing. The nested fault cost is hardware, not something to optimize further.
+5. The nested VM on macOS is a demo tier (a warm step ≈ 1–1.5 s against tens of ms on srt); the production shape is bare Firecracker on Linux (arm64 and, since M5, x86_64). The nested fault cost is hardware, not something to optimize further.
 6. No CI; `lint` script without eslint.
 7. Default policy needs a stock set of irreversible rules (done in M5: `preset: default`); generated files with machine paths (`demo/results`, `.github/hooks/envgit.json`) must stay out of commits.
 

@@ -1,0 +1,29 @@
+# The Linux srt suite on x86_64 (docs/design.md, M5). The vm e2e tests need KVM, which hosted runners
+# do not offer, so they skip here (ENVGIT_VM_E2E is unset); they are run by hand (scripts/vm/).
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      # What srt needs on Linux. Ubuntu 24.04 keeps unprivileged user namespaces behind AppArmor, and
+      # bubblewrap needs them.
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap socat ripgrep
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: npm ci
+      - run: npm run build
+      - run: npx vitest run --no-file-parallelism

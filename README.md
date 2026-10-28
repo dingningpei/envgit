@@ -112,7 +112,7 @@ See [`examples/policy.yaml`](examples/policy.yaml) and [design §3.2, §4](docs/
 | Isolation | OS sandbox via [sandbox-runtime](https://github.com/anthropics/sandbox-runtime): Seatbelt on macOS, bubblewrap on Linux | a Firecracker microVM running Ubuntu 24.04 with git, Python, Node 24 and ripgrep |
 | A snapshot holds | the workdir's files (content-addressed and incremental) | the whole machine: disk, memory and running processes |
 | Rewind brings back | files | files, plus the processes that were running, with their state |
-| Runs on | macOS, Linux | Apple-silicon Macs (M3 or later, macOS 15+), nested in a Virtualization-framework VM; arm64 Linux with KVM (plus `squashfs-tools`) |
+| Runs on | macOS, Linux | Apple-silicon Macs (M3 or later, macOS 15+), nested in a Virtualization-framework VM; arm64 or x86_64 Linux with KVM (plus `squashfs-tools`) |
 
 To use the VM, set `backend: vm` in the policy, run `scripts/vm/build.sh` once, then run `envgit vm up`. The build script downloads pinned, checksummed kernels, Firecracker and images into `~/.cache/envgit/vm`, and prebuilds a warm base snapshot. After that, `vm up` takes about 2 s and a step about 0.4 s.
 
@@ -150,7 +150,7 @@ What works today:
 - the timeline UI.
 
 Known gaps (see [design §7](docs/design.md) for the full review and [§5](docs/design.md) for what is next):
-- The VM backend is arm64 only; x86_64 is not built yet.
+- The VM backend on x86_64 Linux has been checked on one machine (WSL2 with nested KVM), not on bare metal or in CI.
 - The Codex integration relies on `codex exec-server`, which Codex marks as experimental. It was written against Codex 0.162.1.
 - Under Copilot CLI, the agent runs its own tools outside envgit's sandbox. envgit can judge shell command lines there, but not individual HTTP requests — so there it records rather than enforces.
 - The REPL connects stdio MCP servers only; remote (streamable HTTP) servers are not supported yet. A server gets the tokens you give it, and code in the REPL runs in the same sandbox, so it can read them too.
