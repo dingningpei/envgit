@@ -7,6 +7,7 @@ import { runCodexWs, serveCodexStdio } from '../adapters/codex/serve.js'
 import { httpHelper } from '../adapters/codex/http-helper.js'
 import { SrtRunner, VmRunner, type Runner } from '../adapters/codex/runners.js'
 import { serveMcp } from '../adapters/mcp/server.js'
+import { diffSnapshots, formatDiff, stepDiff } from '../ui/diff.js'
 import { serveUi } from '../ui/server.js'
 import { runHook, type HookEvent } from '../adapters/hooks/handler.js'
 import { COPILOT_WRITERS, type Agent } from '../adapters/hooks/normalize.js'
@@ -39,6 +40,8 @@ import {
   writeHead,
   writeMeta,
   type OpenSession,
+  type SessionMeta,
+  type Step,
   type Snapshotting,
   type StepRef,
 } from '../core/snapshot/log.js'
@@ -67,6 +70,10 @@ const help = `envgit — version control for agent execution environments
                          needs CLAUDE_CODE_OAUTH_TOKEN from \`claude setup-token\`, or ANTHROPIC_API_KEY)
   envgit hooks install|uninstall copilot   the same hooks for Copilot CLI (.github/hooks/envgit.json)
   envgit log                     show the steps leading to the current state
+  envgit show <step>             one step in full: its action, effects, and the diff against
+                                 its parent (--session ID: another session than the current)
+  envgit diff <a> <b>            what changed in the workdir between two steps (or base), as a
+                                 unified diff (--session ID as for show)
   envgit ui [--port N] [--open]  the session timeline in a browser: steps, effects, diffs,
                                  rewind and fork (loopback only, a token in the URL)
   envgit rewind <step|base>      restore the workdir to a step (--force drops unrecorded edits)
@@ -431,12 +438,7 @@ async function log(): Promise<number> {
   console.log(`session ${session.meta.id}${from ? ` (forked from ${from.session} step ${from.step})` : ''}`)
   console.log(`  base  ${pruned.has('base') ? 'pruned  ' : short(session.meta.base)}`)
   for (const st of chain) {
-    const input =
-      st.action.type === 'exec'
-        ? (JSON.parse(st.action.input) as string[]).join(' ').replace(/\s+/g, ' ')
-        : st.action.type === 'fs'
-          ? (JSON.parse(st.action.input) as { op: string; path: string }[]).map(o => `${o.op} ${o.path}`).join(', ')
-          : st.action.input.replace(/\s+/g, ' ')
+    const input = stepInput(st)
     const denied = st.effects.filter(e => (e.kind === 'policy' ? RELEVANT_DENIAL.test(e.reason) : 'denied' in e && e.denied)).length
     const cols = [
       String(st.index).padStart(5),
@@ -460,6 +462,88 @@ async function log(): Promise<number> {
 /** 312, 18K, 2.4M */
 function size(n: number): string {
   return n < 1024 ? String(n) : n < 1 << 20 ? `${Math.round(n / 1024)}K` : `${(n / (1 << 20)).toFixed(1)}M`
+}
+
+/** A step's action on one line: the command, the file operations, or the REPL code. */
+function stepInput(st: Step): string {
+  return st.action.type === 'exec'
+    ? (JSON.parse(st.action.input) as string[]).join(' ').replace(/\s+/g, ' ')
+    : st.action.type === 'fs'
+      ? (JSON.parse(st.action.input) as { op: string; path: string }[]).map(o => `${o.op} ${o.path}`).join(', ')
+      : st.action.input.replace(/\s+/g, ' ')
+}
+
+/** The session `show` and `diff` read: `--session ID`, else the current one (never a new one, unlike openSession). */
+async function sessionArg(args: string[]): Promise<{ session: OpenSession; rest: string[] }> {
+  const s = args.indexOf('--session')
+  const id = s >= 0 ? args[s + 1] : (await readFile(join(ROOT, 'current'), 'utf8').catch(() => '')).trim()
+  if (s >= 0 && !id) throw new Error('--session needs a session id')
+  if (!id) throw new Error('no session here yet')
+  const dir = join(ROOT, 'sessions', id)
+  const text = /^[\w-]+$/.test(id) ? await readFile(join(dir, 'session.json'), 'utf8').catch(() => '') : ''
+  if (!text) throw new Error(`no session ${id} (see .envgit/sessions)`)
+  return { session: { dir, meta: JSON.parse(text) as SessionMeta }, rest: args.filter((_, i) => s < 0 || (i !== s && i !== s + 1)) }
+}
+
+async function show(args: string[]): Promise<number> {
+  await requireInit()
+  const { session, rest } = await sessionArg(args)
+  const index = rest.length === 1 ? parseRef(rest[0]) : undefined
+  if (index === undefined || index === 'base') throw new Error('usage: envgit show <step> [--session ID]')
+  const steps = await readSteps(session.dir)
+  const st = steps[index]
+  if (!st) throw new Error(`session ${session.meta.id} has no step ${index} (it has ${steps.length})`)
+  const pruned = await readPruned(session.dir)
+  const lines = [
+    `step ${st.index}  (session ${session.meta.id})`,
+    `action:    ${st.action.type === 'checkpoint' ? 'ckpt' : st.action.type}  ${stepInput(st)}`,
+    ...(st.agent ? [`agent:     ${st.agent.name} ${st.agent.tool}`] : []),
+    `exit:      ${st.exitCode}`,
+    `time:      ${st.startedAt} → ${st.endedAt}`,
+    `parent:    ${st.parent ?? 'base'}`,
+    `snapshot:  ${pruned.has(st.index) ? 'pruned' : (st.snapshot ?? 'none')}`,
+    ...(st.data ? [`data:      in ${size(st.data.in)} out ${size(st.data.out)}${dataFlag(st) ? '  ' + red(`look: in/out ${dataFlag(st)}×`) : ''}`] : []),
+    ...(st.irreversible ? [red(`irreversible: ${st.irreversible.reason}`)] : []),
+  ]
+  // As log and the UI do: policy denials without a target (sysctl, mach lookups) are srt noise, counted only.
+  const noise = st.effects.filter(e => e.kind === 'policy' && !RELEVANT_DENIAL.test(e.reason)).length
+  const effects = st.effects.flatMap(e =>
+    e.kind === 'fs'
+      ? [`${e.denied ? 'denied ' : ''}${e.op} ${e.path}`]
+      : e.kind === 'net'
+        ? [`${e.denied ? 'denied ' : ''}net ${e.method ? e.method + ' ' : ''}${e.host}:${e.port}${e.path ?? ''}${e.irreversible ? `  (${e.irreversible.rule}, ${e.irreversible.decision})` : ''}`]
+        : e.kind === 'proc'
+          ? [`proc ${e.argv.join(' ')}`]
+          : RELEVANT_DENIAL.test(e.reason)
+            ? [`denied ${e.reason}`]
+            : [],
+  )
+  lines.push(`effects:${effects.length ? '' : '   none'}`, ...effects.map(e => `  ${e}`), ...(noise ? [`  (${noise} sandbox lookup(s) denied, not shown)`] : []), '')
+  process.stdout.write(lines.join('\n') + '\n')
+  const d = await stepDiff(ROOT, session.meta, steps, pruned, index)
+  if ('files' in d) {
+    if (d.baseMissing) console.log(`(the parent's snapshot is gone, so every file shows as added)`)
+    process.stdout.write(formatDiff(d, process.stdout.isTTY) || '(no changes to files)\n')
+  } else console.log(`(no diff: ${'error' in d ? d.error : d.unavailable})`)
+  return 0
+}
+
+async function diffCmd(args: string[]): Promise<number> {
+  await requireInit()
+  const { session, rest } = await sessionArg(args)
+  if (rest.length !== 2) throw new Error('usage: envgit diff <step|base> <step|base> [--session ID]')
+  const refs = rest.map(parseRef)
+  if (session.meta.backend === 'vm') throw new Error('vm snapshots are memory and disk images, not files; `envgit show <step>` lists each step’s file effects')
+  const ids: SnapshotId[] = []
+  for (const r of refs) {
+    const id = await snapshotOf(session, r)
+    if (!id) throw new Error(await noSnapshot(session, r))
+    ids.push(id)
+  }
+  const d = await diffSnapshots(new SnapshotStore(ROOT), ids[0], ids[1]!)
+  if (!d || d.baseMissing) throw new Error(`the snapshot of ${rest[d ? 0 : 1]} is gone from the store (envgit gc?)`)
+  process.stdout.write(formatDiff(d, process.stdout.isTTY))
+  return 0
 }
 
 async function rewind(args: string[]): Promise<number> {
@@ -848,6 +932,12 @@ try {
       break
     case 'log':
       code = await log()
+      break
+    case 'show':
+      code = await show(args)
+      break
+    case 'diff':
+      code = await diffCmd(args)
       break
     case 'ui':
       code = await ui(args)

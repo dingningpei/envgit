@@ -10,11 +10,8 @@ import { readdir, readFile } from 'node:fs/promises'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { isAbsolute, join, resolve } from 'node:path'
-import type { SnapshotId } from '../core/env/backend.js'
 import { activeChain, busyHolder, readHead, readPruned, type SessionMeta, type Step } from '../core/snapshot/log.js'
-import type { Entry } from '../core/snapshot/store.js'
-import { SnapshotStore } from '../core/snapshot/store.js'
-import { unifiedDiff, type Hunk } from './diff.js'
+import { stepDiff } from './diff.js'
 import { PAGE } from './page.js'
 
 export interface UiOptions {
@@ -25,9 +22,6 @@ export interface UiOptions {
   cli: string
   port?: number
 }
-
-const MAX_DIFF_FILES = 200
-const MAX_DIFF_BYTES = 1 << 20
 
 export async function serveUi(o: UiOptions): Promise<{ url: string; close: () => Promise<void> }> {
   const token = randomBytes(18).toString('base64url')
@@ -137,58 +131,10 @@ async function state(o: UiOptions, selected?: string) {
   }
 }
 
-type FileChange = { path: string; status: 'added' | 'deleted' | 'modified'; kind: string; hunks?: Hunk[]; note?: string }
-
 /** What a step changed in the workdir: its snapshot against its parent's (fs-level snapshots, srt only). */
 async function diff(o: UiOptions, sessionId: string, index: number) {
   const meta = await readMeta(o, sessionId)
   if (!meta) return { error: 'no such session' }
-  if (meta.backend === 'vm') return { unavailable: 'vm snapshots are memory and disk images; the step’s file effects (from the mirror sync) list what changed in /work' }
-  const steps = await readStepsLive(join(o.root, 'sessions', sessionId))
-  const step = steps[index]
-  if (!step?.snapshot) return { error: 'no such step, or it has no snapshot' }
-  const gone = await readPruned(join(o.root, 'sessions', sessionId))
-  if (gone.has(index)) return { unavailable: 'this step’s snapshot was dropped to stay under snapshot.maxBytes; its file effects above still list what it changed' }
-  const parentRef = step.parent ?? 'base'
-  const parentId = gone.has(parentRef) ? undefined : step.parent === undefined ? meta.base : steps[step.parent]?.snapshot
-  const store = new SnapshotStore(o.root)
-  const read = async (id: SnapshotId | undefined) => (id && (await store.has(id)) ? new Map((await store.read(id)).entries.map(e => [e.path, e])) : undefined)
-  const [before, after] = [await read(parentId), await read(step.snapshot)]
-  if (!after) return { error: 'the step’s snapshot is gone (envgit gc?)' }
-  const prev = before ?? new Map<string, Entry>()
-  const changes: FileChange[] = []
-  const same = (a: Entry, b: Entry) =>
-    a.kind === b.kind && (a.kind === 'file' ? a.hash === (b as typeof a).hash && a.mode === (b as typeof a).mode : a.kind === 'symlink' ? a.target === (b as typeof a).target : true)
-  for (const [path, e] of after) {
-    const p = prev.get(path)
-    if (!p) changes.push({ path, status: 'added', kind: e.kind })
-    else if (!same(p, e)) changes.push({ path, status: 'modified', kind: e.kind })
-  }
-  for (const [path, e] of prev) if (!after.has(path)) changes.push({ path, status: 'deleted', kind: e.kind })
-  changes.sort((a, b) => a.path.localeCompare(b.path))
-  const shown = changes.filter(c => c.kind !== 'dir').slice(0, MAX_DIFF_FILES)
-  for (const c of shown) {
-    const a = prev.get(c.path)
-    const b = after.get(c.path)
-    if ((a && a.kind !== 'file') || (b && b.kind !== 'file')) {
-      c.note = [a, b].map(e => (e?.kind === 'symlink' ? `symlink → ${e.target}` : e?.kind)).filter(Boolean).join(' → ')
-      continue
-    }
-    const sizes = [a, b].map(e => (e?.kind === 'file' ? e.size : 0))
-    if (Math.max(...sizes) > MAX_DIFF_BYTES) {
-      c.note = `too large to show (${sizes.map(n => `${(n / 1e6).toFixed(1)} MB`).join(' → ')})`
-      continue
-    }
-    const text = async (e?: Entry) => (e?.kind === 'file' ? await store.readBlob(e.hash).catch(() => undefined) : Buffer.alloc(0))
-    const [ta, tb] = [await text(a), await text(b)]
-    if (!ta || !tb) c.note = 'contents no longer stored'
-    else if (ta.subarray(0, 8192).includes(0) || tb.subarray(0, 8192).includes(0)) c.note = 'binary'
-    else {
-      const hunks = unifiedDiff(ta.toString('utf8'), tb.toString('utf8'))
-      if (hunks) c.hunks = hunks
-      else c.note = 'too many lines to diff'
-    }
-    if (c.status === 'modified' && a?.kind === 'file' && b?.kind === 'file' && a.hash === b.hash) c.note = `mode ${a.mode.toString(8)} → ${b.mode.toString(8)}`
-  }
-  return { files: shown, more: changes.filter(c => c.kind !== 'dir').length - shown.length, dirs: changes.filter(c => c.kind === 'dir').map(c => `${c.status} ${c.path}/`), baseMissing: !before }
+  const dir = join(o.root, 'sessions', sessionId)
+  return stepDiff(o.root, meta, await readStepsLive(dir), await readPruned(dir), index)
 }
