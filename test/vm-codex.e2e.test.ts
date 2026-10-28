@@ -1,5 +1,7 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdtemp, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -59,7 +61,7 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1' || !hasCodex)('envgit as Codex
     dir = await realpath(await mkdtemp(join(tmpdir(), 'envgit-vm-codex-')))
     await writeFile(join(dir, 'notes.txt'), 'original\n')
     await envgit('init')
-    await writeFile(join(dir, '.envgit/policy.yaml'), 'backend: vm\n')
+    await writeFile(join(dir, '.envgit/policy.yaml'), 'backend: vm\nnetwork:\n  allow: ["127.0.0.1"]\nirreversible:\n  - net: { host: "127.0.0.1", method: POST, path: "/deploy" }\n    action: deny\n')
     expect((await envgit('vm', 'up')).stderr).toMatch(/vm up in/)
     child = spawn(process.execPath, [CLI, 'codex-exec-server'], { cwd: dir, stdio: ['pipe', 'pipe', 'inherit'] })
     child.stdout!.on('data', (d: Buffer) => {
@@ -120,6 +122,24 @@ describe.skipIf(process.env.ENVGIT_VM_E2E !== '1' || !hasCodex)('envgit as Codex
     ])
     expect(fsStep!.effects).toEqual(expect.arrayContaining([{ kind: 'fs', op: 'write', path: 'app.py' }, { kind: 'fs', op: 'delete', path: 'notes.txt' }]))
   }, 60_000)
+
+  it('makes Codex\'s http/request from the guest, through the host proxy and gate', async () => {
+    const hits: string[] = []
+    const server = http.createServer((q, r) => (hits.push(`${q.method} ${q.url}`), r.end('from host')))
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+      const get = await call('http/request', { method: 'GET', url: `${base}/ok`, headers: [], requestId: 'g1' })
+      expect(get.error).toBeUndefined()
+      expect(get.result.status).toBe(200)
+      expect(Buffer.from(get.result.bodyBase64, 'base64').toString()).toBe('from host')
+      const deploy = await call('http/request', { method: 'POST', url: `${base}/deploy`, headers: [], requestId: 'g2' })
+      expect(deploy.result.status).toBe(403)
+      expect(hits).toEqual(['GET /ok'])
+    } finally {
+      server.close()
+    }
+  }, 120_000)
 
   it('rewinds the guest to before Codex\'s writes', async () => {
     const all = await steps()

@@ -18,10 +18,10 @@ import { acquireBusy, ensureBase, openSession, releaseBusy, type Snapshotting } 
 import { runHook, type HookContext } from './handler.js'
 import { serveSpool, SPOOL_ENV } from './spool.js'
 
-/** Claude Code's own endpoints (code.claude.com/docs/en/network-config): allowed, never decrypted. */
-/** srt denials worth a step: file and network ones with a target (as `envgit log` shows them). */
-const RELEVANT_DENIAL = /\b(file|network)-\S+\s+\S/
+/** srt denials worth a step: file, network and proxy ones with a target (as `envgit log` shows them). */
+const RELEVANT_DENIAL = /\b(file|network)-\S+\s+\S|\bhttp-request \S/
 
+/** Claude Code's own endpoints (code.claude.com/docs/en/network-config): always allowed. */
 export const CLAUDE_HOSTS = ['api.anthropic.com', 'claude.ai', 'platform.claude.com', 'mcp-proxy.anthropic.com']
 
 export interface ClaudeRunOptions {
@@ -85,8 +85,9 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
       allowWrite: [join(home, '.claude'), join(home, '.claude.json'), `${join(home, '.claude.json')}.*`, join(home, 'Library/Caches/claude-cli-nodejs'), join(home, '.cache/claude'), tmpdir(), claudeTmp, spool],
       // The stored login is out of reach on purpose (see CLAUDE_CREDENTIAL_ENV); no keychain either.
       denyRead: [join(home, '.claude', '.credentials.json')],
+      // Decrypted like any host when the policy has request rules (Claude Code trusts srt's CA through
+      // NODE_EXTRA_CA_CERTS): an excluded host would be an opaque tunnel, which the gate refuses.
       allowedDomains: CLAUDE_HOSTS,
-      noInspect: CLAUDE_HOSTS,
       allowPty: true,
     },
   })

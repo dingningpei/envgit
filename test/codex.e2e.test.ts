@@ -1,5 +1,7 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -21,8 +23,12 @@ const hasCodex = (() => {
 const POLICY = `filesystem:
   read: { allow: ["."] }
   write: { allow: [".", "/tmp"] }
+network:
+  allow: ["127.0.0.1"]
 irreversible:
   - shell: ["git push"]
+    action: deny
+  - net: { host: "127.0.0.1", method: POST, path: "/deploy" }
     action: deny
 `
 
@@ -202,6 +208,37 @@ describe.skipIf(!hasCodex || (process.platform !== 'darwin' && process.platform 
       await rm(join(dir, '.envgit', 'busy'))
     }
   }, 30_000)
+
+  it('makes Codex\'s http/request through the proxy and the gate, not around them', async () => {
+    const hits: string[] = []
+    const server = http.createServer((q, r) => (hits.push(`${q.method} ${q.url}`), r.end('from host')))
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+      const get = await h.call('http/request', { method: 'GET', url: `${base}/ok`, headers: [], requestId: 'r1', streamResponse: false })
+      expect(get.error).toBeUndefined()
+      expect(get.result.status).toBe(200)
+      expect(Buffer.from(get.result.bodyBase64, 'base64').toString()).toBe('from host')
+
+      const streamed = await h.call('http/request', { method: 'GET', url: `${base}/stream`, headers: [], requestId: 'r2', streamResponse: true })
+      expect(streamed.result).toMatchObject({ status: 200, bodyBase64: '' })
+      await h.until(m => m.method === 'http/request/bodyDelta' && m.params.requestId === 'r2' && m.params.done)
+      const body = h.notes.filter(m => m.method === 'http/request/bodyDelta' && m.params.requestId === 'r2').map(m => Buffer.from(m.params.deltaBase64, 'base64').toString()).join('')
+      expect(body).toBe('from host')
+
+      const deploy = await h.call('http/request', { method: 'POST', url: `${base}/deploy`, headers: [], bodyBase64: Buffer.from('{}').toString('base64'), requestId: 'r3' })
+      expect(deploy.result.status).toBe(403)
+      expect(Buffer.from(deploy.result.bodyBase64, 'base64').toString()).toMatch(/envgit: POST 127\.0\.0\.1\/deploy is irreversible .*policy denies it/)
+      expect(hits).toEqual(['GET /ok', 'GET /stream'])
+      // The gate's decision lands on the next step.
+      await start('h1', 'true')
+      const last = (await steps()).at(-1)!
+      expect(last.effects).toContainEqual(expect.objectContaining({ kind: 'net', method: 'POST', path: '/deploy', denied: true }))
+      seen = (await steps()).length
+    } finally {
+      server.close()
+    }
+  }, 60_000)
 
   it('rewinds Codex steps like any other', async () => {
     const all = await steps()

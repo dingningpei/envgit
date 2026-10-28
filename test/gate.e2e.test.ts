@@ -107,6 +107,21 @@ irreversible:
     expect(hits).not.toContain('GET /admin')
   }, 30_000)
 
+  it('refuses plain HTTP inside a CONNECT tunnel, which the gate could not see into', async () => {
+    // curl -p tunnels even http:// through CONNECT; before refuseOpaqueTunnels this POST went out unjudged.
+    const before = hits.length
+    const r = await envgit('run', 'curl', '-s', '-p', '--noproxy', '', '-X', 'POST', '-w', ' %{http_code}', `${base}/deploy`)
+    expect(hits.slice(before)).toEqual([])
+    expect(r.stdout).not.toMatch(/done/)
+    const step = (await steps()).at(-1)
+    expect(step.effects).toContainEqual({ kind: 'policy', denied: true, reason: expect.stringMatching(/^deny http-request CONNECT 127\.0\.0\.1:\d+ \(tunnel carries no TLS and cannot be inspected\)$/) })
+  }, 30_000)
+
+  it('refuses a request whose Host header names another host than its target', async () => {
+    const r = await envgit('run', 'curl', '-s', '--noproxy', '', '-H', 'Host: elsewhere.example', '-w', ' %{http_code}', `${base}/api/x`)
+    expect(r.stdout).toMatch(/Host header does not match the request target\s+421$/)
+  }, 30_000)
+
   it('refuses a denied command line before it starts', async () => {
     const n = (await steps()).length
     const r = await envgit('run', 'rm', '-rf', '/')

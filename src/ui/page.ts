@@ -122,7 +122,7 @@ const short = id => (id ? id.slice(0, 8) : '--------')
 const time = iso => (iso ? new Date(iso).toLocaleTimeString() : '')
 const label = t => ({ checkpoint: 'ckpt' })[t] || t
 // As envgit log: file and network denials (and envgit's own refusals) matter; sysctl/mach lookups are noise.
-const relevant = e => e.kind === 'policy' && (/\\b(file|network)-\\S+\\s+\\S/.test(e.reason) || /^envgit: /.test(e.reason))
+const relevant = e => e.kind === 'policy' && (/\\b(file|network)-\\S+\\s+\\S|\\bhttp-request \\S/.test(e.reason) || /^envgit: /.test(e.reason))
 
 function summary(st) {
   try {

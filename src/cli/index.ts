@@ -4,6 +4,7 @@ import { access, copyFile, cp, mkdir, readFile, rename, rm, writeFile } from 'no
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runCodexWs, serveCodexStdio } from '../adapters/codex/serve.js'
+import { httpHelper } from '../adapters/codex/http-helper.js'
 import { SrtRunner, VmRunner, type Runner } from '../adapters/codex/runners.js'
 import { serveMcp } from '../adapters/mcp/server.js'
 import { serveUi } from '../ui/server.js'
@@ -15,7 +16,7 @@ import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
 import { recordVmStep, reportMirror, withEgress } from '../core/env/vm-step.js'
 import { buildPrebuiltBase, copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmImageStamp, vmSnapshotExists, vmStale, vmUp } from '../core/env/vm.js'
-import { Gate, irreversibleOf } from '../core/policy/gate.js'
+import { Gate, irreversibleOf, needsInspection } from '../core/policy/gate.js'
 import { ttyApprover } from './approve.js'
 import { loadPolicy } from '../core/policy/load.js'
 import type { Policy } from '../core/policy/schema.js'
@@ -84,8 +85,8 @@ via elicitation, and denies when no one can be asked; \`deny\` / \`allow\` skip 
 const ROOT = join(process.cwd(), '.envgit')
 const POLICY = join(ROOT, 'policy.yaml')
 const DEFAULT_POLICY = fileURLToPath(new URL('../../examples/policy.yaml', import.meta.url))
-/** srt violation lines worth showing: fs or network with a target, not sysctl/mach noise. */
-const RELEVANT_DENIAL = /\b(file|network)-\S+\s+\S/
+/** srt violation lines worth showing: fs, network or proxy refusals with a target, not sysctl/mach noise. */
+const RELEVANT_DENIAL = /\b(file|network)-\S+\s+\S|\bhttp-request \S/
 
 function snapshotting(policy: Policy): Snapshotting {
   const store = new SnapshotStore(ROOT)
@@ -339,6 +340,14 @@ async function requireInit(): Promise<Policy> {
   if (!(await exists(POLICY))) throw new Error('no .envgit/policy.yaml here — run `envgit init` first')
   const policy = await loadPolicy(POLICY)
   if (policy.snapshot?.maxBytes !== undefined) parseBytes(policy.snapshot.maxBytes)
+  // With request rules the gate refuses every tunnel it cannot see into, so a host left undecrypted
+  // could not be reached at all: say so here rather than as 403s later.
+  if (policy.network?.noInspect?.length && needsInspection(policy)) {
+    throw new Error(
+      `policy: network.noInspect (${policy.network.noInspect.join(', ')}) cannot be combined with request rules (network.l7 or irreversible net rules): ` +
+        'the gate refuses tunnels it cannot inspect, so those hosts would be unreachable. Drop noInspect, or drop the request rules.',
+    )
+  }
   await recoverRestore(policy)
   return policy
 }
@@ -813,6 +822,9 @@ try {
       break
     case 'codex-exec-server':
       code = await codexExecServer()
+      break
+    case 'codex-http-helper':
+      code = await httpHelper()
       break
     case 'claude':
       code = await claude(args)

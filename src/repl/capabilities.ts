@@ -3,6 +3,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { Effect } from '../core/env/backend.js'
 import type { Policy } from '../core/policy/schema.js'
+import { proxiedFetch } from '../core/env/proxied-fetch.js'
 
 export interface Capabilities {
   globals: Record<string, unknown>
@@ -93,7 +94,8 @@ function traceFetch(onEffect: (e: Effect) => void): typeof fetch {
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
     const net = { kind: 'net' as const, host: url.hostname, port: Number(url.port) || (url.protocol === 'http:' ? 80 : 443), method, path: url.pathname }
     try {
-      const res = await fetch(input, init)
+      // http:// as an ordinary proxied request: fetch would tunnel it, which the gate refuses.
+      const res = await proxiedFetch(input, init)
       // A 403 from envgit's gate is already on the step as the gate's own effect; don't record it twice.
       const gated = res.status === 403 && (await res.clone().text().then(t => t.startsWith('envgit: '), () => false))
       if (!gated) onEffect(net)

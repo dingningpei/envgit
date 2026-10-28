@@ -36,6 +36,8 @@ out.offList = spawnSync('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', 
 const deploy = { tool_name: 'Bash', tool_input: { command: 'curl -X POST ' + process.env.BASE + '/deploy' }, tool_use_id: 't2' }
 out.deployPre = fire('PreToolUse', deploy)
 out.deploy = spawnSync('curl', ['-s', '--noproxy', '', '-X', 'POST', '-w', ' %{http_code}', process.env.BASE + '/deploy'], { encoding: 'utf8' }).stdout
+// The same POST inside a CONNECT tunnel, which the gate cannot see into: refused, not let through.
+out.tunnel = spawnSync('curl', ['-s', '-p', '--noproxy', '', '-X', 'POST', process.env.BASE + '/deploy'], { encoding: 'utf8' }).stdout
 fire('PostToolUse', deploy)
 fire('Stop', {})
 console.log(JSON.stringify(out))
@@ -96,6 +98,7 @@ irreversible:
     expect(out.offList).toBe('403')
     expect(out.deployPre).toBe('') // nothing on the command line to refuse
     expect(out.deploy).toMatch(/403$/)
+    expect(out.tunnel).not.toMatch(/done/)
     expect(hits).not.toContain('POST /deploy')
 
     const current = (await readFile(join(dir, '.envgit/current'), 'utf8')).trim()
@@ -111,7 +114,8 @@ irreversible:
     const all = steps.flatMap(s => s.effects)
     expect(all).toContainEqual(expect.objectContaining({ kind: 'policy', reason: expect.stringMatching(/network-outbound example\.com:80/) }))
     // srt's system-lookup noise is left out, and no checkpoint is recorded for nothing.
-    expect(all.every(e => e.kind !== 'policy' || /\b(file|network)-/.test(e.reason))).toBe(true)
+    expect(all.every(e => e.kind !== 'policy' || /\b(file|network)-|\bhttp-request /.test(e.reason))).toBe(true)
+    expect(all).toContainEqual(expect.objectContaining({ kind: 'policy', reason: expect.stringMatching(/http-request CONNECT .*tunnel carries no TLS/) }))
     expect(steps.filter(s => s.action.type === 'checkpoint').every(s => s.effects.length > 0)).toBe(true)
     expect((await run(process.execPath, [CLI, 'log'], { cwd: dir })).stdout).toMatch(/curl -X POST .* \d+ denied/)
   }, 60_000)

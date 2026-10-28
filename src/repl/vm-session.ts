@@ -19,19 +19,21 @@ import { acquireBusy, ensureBase, readHead, releaseBusy, type OpenSession, type 
 import type { Repl, ReplResult } from './session.js'
 import { CAPABILITIES_ENV, type WorkerMessage } from './worker.js'
 
-/** envgit's worker as installed in L2: the compiled REPL modules, acorn, and an entry point. */
+/** envgit's worker as installed in L2: the compiled REPL modules (and what they import), acorn, and an entry point. */
 async function workerBundle(): Promise<{ tar: Buffer; version: string }> {
   const here = dirname(fileURLToPath(import.meta.url))
   const acorn = dirname(dirname(createRequire(import.meta.url).resolve('acorn')))
   const stage = await mkdtemp(join(tmpdir(), 'envgit-worker-'))
   try {
     for (const f of ['worker.js', 'capabilities.js', 'engine.js']) await cp(join(here, f), join(stage, 'repl', f))
+    // capabilities.js imports it (the REPL's fetch for plain HTTP through the proxy).
+    await cp(join(here, '../core/env/proxied-fetch.js'), join(stage, 'core/env/proxied-fetch.js'))
     await cp(join(acorn, 'package.json'), join(stage, 'node_modules/acorn/package.json'))
     await cp(join(acorn, 'dist'), join(stage, 'node_modules/acorn/dist'), { recursive: true })
     await writeFile(join(stage, 'package.json'), '{"type":"module"}\n')
     await writeFile(join(stage, 'worker.mjs'), "import { runWorker } from './repl/worker.js'\nawait runWorker()\n")
     const h = createHash('sha256')
-    for (const f of ['repl/worker.js', 'repl/capabilities.js', 'repl/engine.js', 'worker.mjs']) h.update(await readFile(join(stage, f)))
+    for (const f of ['repl/worker.js', 'repl/capabilities.js', 'repl/engine.js', 'core/env/proxied-fetch.js', 'worker.mjs']) h.update(await readFile(join(stage, f)))
     const version = h.digest('hex').slice(0, 16)
     await writeFile(join(stage, 'VERSION'), version + '\n')
     return { tar: await tarFrom(stage), version }

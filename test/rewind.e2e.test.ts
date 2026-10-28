@@ -29,6 +29,13 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect(stdout).toMatch(/head: 1$/m)
   })
 
+  it('records the files each step changed, from its snapshot against its parent', async () => {
+    const session = (await readFile(join(dir, '.envgit/current'), 'utf8')).trim()
+    const steps = (await readFile(join(dir, '.envgit/sessions', session, 'steps.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l))
+    expect(steps[0].effects).toContainEqual({ kind: 'fs', op: 'write', path: 'f' })
+    expect(steps[1].effects).toEqual(expect.arrayContaining([{ kind: 'fs', op: 'write', path: 'f' }, { kind: 'fs', op: 'delete', path: 'sub/s.txt' }]))
+  })
+
   it('rewinds the workdir and keeps the old branch in the log', async () => {
     await envgit(dir, 'rewind', '0')
     expect(await readFile(join(dir, 'f'), 'utf8')).toBe('a\n')

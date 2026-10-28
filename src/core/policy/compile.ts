@@ -10,21 +10,19 @@ import type { Policy } from './schema.js'
  */
 /**
  * What one run needs beyond the policy — e.g. `envgit claude`, whose own process lives in the sandbox:
- * its config dir writable, its API hosts allowed but not decrypted.
+ * its config dir writable, its API hosts allowed.
  */
 export interface SrtExtra {
   allowWrite?: string[]
   denyRead?: string[]
   allowedDomains?: string[]
-  /** Hosts allowed through without TLS termination, whatever the policy's request rules. */
-  noInspect?: string[]
   allowPty?: boolean
 }
 
 export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath: string; keyPath: string }; extra?: SrtExtra } = {}): SandboxRuntimeConfig {
   const x = opts.extra ?? {}
   const fs = policy.filesystem ?? {}
-  const net = { ...policy.network, allow: [...(policy.network?.allow ?? []), ...(x.allowedDomains ?? [])], noInspect: [...(policy.network?.noInspect ?? []), ...(x.noInspect ?? [])] }
+  const net = { ...policy.network, allow: [...(policy.network?.allow ?? []), ...(x.allowedDomains ?? [])] }
   return {
     ...(x.allowPty && { allowPty: true }),
     network: {
@@ -40,6 +38,11 @@ export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath:
           filterRequest: gate.filterRequest,
           // `/a/../b` or `%2e` spellings could name another resource than the one a rule judged.
           ambiguousRequestTarget: 'refuse' as const,
+          // A CONNECT carrying plain HTTP (curl -p, Node's fetch for http://) or no TLS at all would pass
+          // as an opaque tunnel the gate never sees; and a Host header could name another host than the
+          // one connected to. Both are refused while request rules apply (docs/design.md §4).
+          refuseOpaqueTunnels: true,
+          requireHostMatch: true,
         }),
     },
     filesystem: {

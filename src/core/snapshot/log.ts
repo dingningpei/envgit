@@ -1,7 +1,7 @@
 /** Append-only action log. See docs/design.md §2 */
 import { randomBytes } from 'node:crypto'
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import type { Effect, SnapshotId } from '../env/backend.js'
 import type { SnapshotStore } from './store.js'
 
@@ -165,6 +165,22 @@ export async function ensureBase(session: OpenSession, snap: Snapshotting): Prom
   await writeMeta(session)
 }
 
+/** Per kind: a step like `npm install` must not put tens of thousands of paths in the log. */
+const MAX_FS_EFFECTS = 1000
+
+/** Adds the files a snapshot diff found changed, unless an effect already names them. */
+function withFileChanges(effects: Effect[], changes: { path: string; op: 'write' | 'delete'; kind: string }[], workdir: string): Effect[] {
+  // Capability wrappers record absolute paths, the diff workdir-relative ones.
+  const rel = (p: string) => (isAbsolute(p) ? relative(workdir, p) : p)
+  const known = new Set(effects.filter(e => e.kind === 'fs').map(e => `${(e as { op: string }).op} ${rel((e as { path: string }).path)}`))
+  const files = changes.filter(c => c.kind !== 'dir' && !known.has(`${c.op} ${c.path}`))
+  return [
+    ...effects,
+    ...files.filter(c => c.op === 'write').slice(0, MAX_FS_EFFECTS).map(c => ({ kind: 'fs', op: 'write', path: c.path }) as const),
+    ...files.filter(c => c.op === 'delete').slice(0, MAX_FS_EFFECTS).map(c => ({ kind: 'fs', op: 'delete', path: c.path }) as const),
+  ]
+}
+
 /** Snapshots the workdir and appends a step as a child of the current head. */
 export async function recordStep(
   session: OpenSession,
@@ -174,14 +190,17 @@ export async function recordStep(
   const steps = await readSteps(session.dir)
   const head = await readHead(session.dir)
   let snapshot: SnapshotId
+  let effects = partial.effects
   if (snap.take) {
     snapshot = await snap.take()
   } else {
     const prevId = await snapshotOf(session, head)
     const prev = prevId && (await snap.store.has(prevId)) ? await snap.store.read(prevId) : undefined
     snapshot = await snap.store.snapshot(snap.workdir, snap.exclude, prev)
+    // What the step changed is what differs from its parent's snapshot, whoever wrote it.
+    if (prevId && snapshot !== prevId) effects = withFileChanges(effects, await snap.store.changes(prevId, snapshot), snap.workdir)
   }
-  const step: Step = { ...partial, index: steps.length, ...(head !== 'base' && { parent: head }), snapshot }
+  const step: Step = { ...partial, effects, index: steps.length, ...(head !== 'base' && { parent: head }), snapshot }
   await appendStep(session.dir, step)
   await writeHead(session.dir, step.index)
   await snap.cap?.().catch(e => console.error(`envgit: keeping snapshots under snapshot.maxBytes failed: ${e instanceof Error ? e.message : e}`))

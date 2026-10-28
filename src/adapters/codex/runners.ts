@@ -13,6 +13,65 @@ import type { Gate } from '../../core/policy/gate.js'
 import type { Policy } from '../../core/policy/schema.js'
 import { ensureBase, recordStep, type OpenSession, type Snapshotting, type Step } from '../../core/snapshot/log.js'
 
+/** This CLI, for running its helpers inside the sandbox. */
+const CLI = fileURLToPath(new URL('../../cli/index.js', import.meta.url))
+
+/** The http helper for the guest (it has node 24, not envgit): buffered, the body as base64. */
+const GUEST_HTTP = `
+const http = require('node:http')
+const req = JSON.parse(Buffer.from(process.env.ENVGIT_HTTP_REQUEST, 'base64').toString())
+const headers = (req.headers ?? []).map(h => [h.name, h.valueEnvVar ? h.value + (process.env[h.valueEnvVar] ?? '') : h.value])
+const signal = req.timeoutMs != null ? AbortSignal.timeout(req.timeoutMs) : undefined
+// As http-helper.ts: https by fetch (CONNECT + TLS, judged), http as an ordinary proxied request.
+const viaProxy = (method, url, body) => new Promise((resolve, reject) => {
+  const p = new URL(process.env.HTTP_PROXY), t = new URL(url)
+  const auth = p.username ? [['proxy-authorization', 'Basic ' + Buffer.from(decodeURIComponent(p.username) + ':' + decodeURIComponent(p.password)).toString('base64')]] : []
+  const q = http.request({ host: p.hostname, port: Number(p.port) || 80, method, path: t.href, agent: new http.Agent(), signal,
+    headers: [...headers.filter(([n]) => n.toLowerCase() !== 'host'), ['host', t.host], ...auth].flat() }, res => {
+    const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => {
+      const out = []; for (let i = 0; i < res.rawHeaders.length; i += 2) out.push({ name: res.rawHeaders[i].toLowerCase(), value: res.rawHeaders[i + 1] })
+      resolve({ status: res.statusCode, headers: out, body: Buffer.concat(chunks) }) }) })
+  q.on('error', reject); q.end(body)
+})
+const viaFetch = async (method, url, body) => {
+  const r = await fetch(url, { method, headers, ...(body && { body }), redirect: 'manual', ...(signal && { signal }) })
+  const out = []; r.headers.forEach((value, name) => out.push({ name, value }))
+  return { status: r.status, headers: out, body: Buffer.from(await r.arrayBuffer()) }
+}
+;(async () => {
+  let method = req.method, url = req.url, body = req.bodyBase64 ? Buffer.from(req.bodyBase64, 'base64') : undefined, res
+  for (let hop = 0; ; hop++) {
+    res = new URL(url).protocol === 'http:' ? await viaProxy(method, url, body) : await viaFetch(method, url, body)
+    const loc = res.headers.find(h => h.name === 'location')?.value
+    if (req.redirectPolicy === 'stop' || !loc || res.status < 300 || res.status > 399 || hop >= 5) break
+    url = new URL(loc, url).href
+    if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) { method = 'GET'; body = undefined }
+  }
+  process.stdout.write(JSON.stringify({ status: res.status, headers: res.headers, bodyBase64: res.body.toString('base64') }))
+})().catch(e => { process.stderr.write(String(e && e.cause ? e.message + ': ' + e.cause.message : e)); process.exit(1) })
+`
+
+/** Splits the helper's output: one JSON line of status and headers, then the body as it streams. */
+async function readHelper(out: NodeJS.ReadableStream, failure: () => Promise<string>): Promise<HttpResponse> {
+  const it = (out as AsyncIterable<Buffer>)[Symbol.asyncIterator]()
+  let buf = Buffer.alloc(0)
+  for (;;) {
+    const nl = buf.indexOf(10)
+    if (nl >= 0) {
+      const head = JSON.parse(buf.subarray(0, nl).toString('utf8')) as { status: number; headers: { name: string; value: string }[] }
+      const rest = buf.subarray(nl + 1)
+      const body = (async function* () {
+        if (rest.length) yield rest
+        for (let r = await it.next(); !r.done; r = await it.next()) yield r.value as Buffer
+      })()
+      return { ...head, body }
+    }
+    const r = await it.next()
+    if (r.done) throw new Error((await failure()).trim() || 'the request got no response')
+    buf = Buffer.concat([buf, r.value as Buffer])
+  }
+}
+
 export type StepFields = Omit<Step, 'index' | 'parent' | 'snapshot'>
 export type FsOp = { op: 'write' | 'delete'; path: string }
 
@@ -30,8 +89,26 @@ export interface RunHandle {
   done: Promise<{ exitCode: number; effects: Effect[] }>
 }
 
+/** One of Codex's `http/request`s, as the helper takes it (see http-helper.ts). */
+export interface HttpRequest {
+  method: string
+  url: string
+  headers?: { name: string; value: string; valueEnvVar?: string }[]
+  bodyBase64?: string
+  timeoutMs?: number | null
+  redirectPolicy?: 'follow' | 'stop'
+}
+
+export interface HttpResponse {
+  status: number
+  headers: { name: string; value: string }[]
+  body: AsyncIterable<Buffer>
+}
+
 export interface Runner {
   readonly sandboxType: string
+  /** Codex's executor-side HTTP, made where its commands run: through the proxy and the gate. */
+  httpRequest(req: HttpRequest): Promise<HttpResponse>
   readonly session: OpenSession
   /** Makes the real exec-server's environment info describe where commands actually run. */
   adjustInfo(info: any): void
@@ -121,6 +198,22 @@ export class SrtRunner implements Runner {
 
   async applyFs(): Promise<void> {}
 
+  async httpRequest(req: HttpRequest): Promise<HttpResponse> {
+    // srt exempts loopback from its proxy (NO_PROXY, set on the wrapped command line, so cleared the
+    // same way): Codex's requests to a local MCP server must meet the gate too. Bundled roots plus srt's
+    // CA (NODE_EXTRA_CA_CERTS): reading the macOS system store needs trustd, which the sandbox does not reach.
+    const argv = ['/usr/bin/env', 'NO_PROXY=', 'no_proxy=', process.execPath, '--use-bundled-ca', CLI, 'codex-http-helper']
+    const { child } = await this.backend.spawn(this.env, { argv, cwd: this.o.workdir }, ['pipe', 'pipe', 'pipe'])
+    this.running++
+    let stderr = ''
+    child.stderr!.on('data', (d: Buffer) => (stderr += d))
+    child.on('close', () => {
+      if (--this.running === 0) SandboxManager.cleanupAfterCommand()
+    })
+    child.stdin!.end(JSON.stringify(req))
+    return readHelper(child.stdout!, () => new Promise(r => (child.exitCode !== null ? r(stderr) : child.on('close', () => r(stderr)))))
+  }
+
   async record(step: StepFields): Promise<void> {
     await recordStep(this.session, this.o.snapshotting, step)
   }
@@ -189,6 +282,30 @@ export class VmRunner implements Runner {
   }
 
   /** After any command still running in the guest: pushes must not interleave with one. */
+  /**
+   * In the guest, behind its egress: the helper's logic inlined for the guest's node (no envgit there),
+   * with the request in an environment variable (L2's exec has no stdin) and the body back as base64
+   * (its output is text), so it arrives in one piece.
+   */
+  async httpRequest(req: HttpRequest): Promise<HttpResponse> {
+    const done = this.chain.then(() =>
+      withEgress(this.o.workdir, this.o.policy, this.o.gate, this.vm, () =>
+        this.vm.exec(
+          { id: '', backend: 'vm' },
+          { argv: ['node', '-e', GUEST_HTTP], env: { ...L2_NET_ENV, ENVGIT_HTTP_REQUEST: Buffer.from(JSON.stringify(req)).toString('base64') } },
+          undefined,
+          { quiet: true },
+        ),
+      this.keep),
+    )
+    this.chain = done.catch(() => {})
+    const { result } = await done
+    if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `request failed (exit ${result.exitCode})`)
+    const r = JSON.parse(result.stdout) as { status: number; headers: { name: string; value: string }[]; bodyBase64: string }
+    const body = Buffer.from(r.bodyBase64, 'base64')
+    return { status: r.status, headers: r.headers, body: (async function* () { if (body.length) yield body })() }
+  }
+
   async applyFs(ops: FsOp[]): Promise<void> {
     const done = this.chain.then(() => this.push(ops))
     this.chain = done.catch(() => {})

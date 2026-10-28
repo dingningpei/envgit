@@ -5,6 +5,7 @@
  *
  *   process/*   run by envgit's backend (runners.ts: srt, or the vm guest), behind its gate; each process is a step
  *   fs mutators forwarded to a real `codex exec-server` (on the host), then recorded as one step per burst
+ *   http/request made from inside the sandbox too, through the proxy and the gate
  *   the rest    (reads, metadata, config, discovery) forwarded unchanged
  *
  * Step boundaries follow the capture of a real `codex exec`: one non-PTY `process/start` per shell
@@ -39,6 +40,8 @@ const UNSERVED_CAPABILITIES = ['fileWriteStreaming', 'sandboxedFileStreaming', '
 /** A burst of fs writes (one apply_patch) ends after this much quiet, or when a command starts. */
 const FS_QUIET_MS = 150
 const MAX_BUFFERED = 8 << 20
+/** The protocol's cap on one http/request/bodyDelta. */
+const MAX_HTTP_DELTA = 1 << 20
 
 interface Proc {
   handle: RunHandle
@@ -177,6 +180,8 @@ export class CodexExecServer {
         const ok = p.exitCode === undefined && p.handle.write(Buffer.from(String(m.params?.chunk ?? ''), 'base64'))
         return this.reply(m.id, { status: ok ? 'accepted' : 'stdinClosed' })
       }
+      case 'http/request':
+        return this.httpRequest(m)
       case 'process/signal':
       case 'process/terminate': {
         const p = this.procs.get(m.params?.processId)
@@ -277,6 +282,48 @@ export class CodexExecServer {
         this.notify('process/closed', { processId: id, seq: ++proc.seq })
         wake()
       })
+  }
+
+  /**
+   * Codex's executor-side HTTP (remote MCP servers, OAuth discovery), made where its commands run —
+   * through envgit's proxy and gate — instead of by the real exec-server around them. What the gate
+   * judges lands on the next step, as for any request a background process makes.
+   */
+  private async httpRequest(m: Msg): Promise<void> {
+    const p = m.params ?? {}
+    if (!this.runner) return this.fail(m.id, -32603, 'envgit: not started')
+    const requestId = String(p.requestId ?? '')
+    let res
+    try {
+      res = await this.runner.httpRequest({
+        method: p.method,
+        url: p.url,
+        headers: p.headers,
+        bodyBase64: p.bodyBase64 ?? undefined,
+        timeoutMs: p.timeoutMs,
+        redirectPolicy: p.redirectPolicy,
+      })
+    } catch (e) {
+      return this.fail(m.id, -32603, `envgit: ${p.method} ${p.url}: ${e instanceof Error ? e.message : e}`)
+    }
+    if (!p.streamResponse) {
+      const chunks: Buffer[] = []
+      for await (const c of res.body) chunks.push(c)
+      return this.reply(m.id, { status: res.status, headers: res.headers, bodyBase64: Buffer.concat(chunks).toString('base64') })
+    }
+    this.reply(m.id, { status: res.status, headers: res.headers, bodyBase64: '' })
+    // Streamed after the reply, outside the request queue: Codex reads the body as it comes.
+    void (async () => {
+      let seq = 0
+      try {
+        for await (const c of res.body)
+          for (let i = 0; i < c.length; i += MAX_HTTP_DELTA)
+            this.notify('http/request/bodyDelta', { requestId, seq: ++seq, deltaBase64: c.subarray(i, i + MAX_HTTP_DELTA).toString('base64'), done: false })
+        this.notify('http/request/bodyDelta', { requestId, seq: ++seq, deltaBase64: '', done: true })
+      } catch (e) {
+        this.notify('http/request/bodyDelta', { requestId, seq: ++seq, deltaBase64: '', done: true, error: e instanceof Error ? e.message : String(e) })
+      }
+    })()
   }
 
   private async processRead(m: Msg): Promise<void> {
