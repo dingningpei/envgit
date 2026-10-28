@@ -128,6 +128,7 @@ export class ReplSession implements Repl {
     let output = ''
     let error: string | undefined
     let observed: Effect[] = []
+    let bytesIn: number | undefined
     let timer: NodeJS.Timeout | undefined
     try {
       const reply = await Promise.race([
@@ -147,6 +148,7 @@ export class ReplSession implements Repl {
         output = reply.output
         error = reply.error
         observed = reply.effects
+        bytesIn = reply.in
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -172,6 +174,8 @@ export class ReplSession implements Repl {
       action: { type: 'repl', input: code },
       exitCode: error ? 1 : 0,
       effects,
+      // What reached the model: the output and error text, as the caller returns them.
+      ...(bytesIn !== undefined && { data: { in: bytesIn, out: Buffer.byteLength(output) + Buffer.byteLength(error ?? '') } }),
       ...(irreversibleOf(effects) && { irreversible: { reason: irreversibleOf(effects)! } }),
     })
     return { output, error, effects, step: step.index }

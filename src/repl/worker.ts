@@ -11,7 +11,8 @@ export interface WorkerRequest {
   code: string
 }
 
-export type WorkerMessage = { ready: true } | { id: number; output: string; error?: string; effects: Effect[] }
+/** `in`: bytes the capabilities brought into the REPL for this request (docs/design.md §3.3). */
+export type WorkerMessage = { ready: true } | { id: number; output: string; error?: string; effects: Effect[]; in?: number }
 
 /** What `DESCRIBE` answers, as the reply's output (JSON). */
 export interface Description {
@@ -34,12 +35,13 @@ export async function runWorker(): Promise<void> {
   const caps = JSON.parse(process.env[CAPABILITIES_ENV] ?? '{}') as NonNullable<Policy['capabilities']>
   const servers = JSON.parse(process.env[MCP_ENV] ?? '{}') as Record<string, McpServerConfig>
   let effects: Effect[] = []
+  let bytesIn = 0
   const send = (m: WorkerMessage) => process.stdout.write(JSON.stringify(m) + '\n')
   // A server that will not start is reported on every request rather than taking the worker down.
   let built: Capabilities | undefined
   let startError: string | undefined
   try {
-    built = await buildCapabilities(caps, process.cwd(), e => effects.push(e), servers)
+    built = await buildCapabilities(caps, process.cwd(), e => effects.push(e), servers, n => (bytesIn += n))
   } catch (e) {
     startError = e instanceof Error ? e.message : String(e)
   }
@@ -51,6 +53,7 @@ export async function runWorker(): Promise<void> {
     if (!line.trim()) continue
     const req = JSON.parse(line) as WorkerRequest
     effects = []
+    bytesIn = 0
     if (!built || !engine) {
       send({ id: req.id, output: '', error: startError!, effects })
     } else if (req.code === DESCRIBE) {
@@ -58,7 +61,7 @@ export async function runWorker(): Promise<void> {
     } else {
       const raw = req.code.startsWith(RAW)
       const result = await engine.execute(raw ? req.code.slice(RAW.length) : req.code, { raw })
-      send({ id: req.id, ...result, effects })
+      send({ id: req.id, ...result, effects, in: bytesIn })
     }
   }
   built?.close()

@@ -1,4 +1,6 @@
 /** The timeline page served by `envgit ui`: one self-contained document, no external resources. */
+import { DATA_FLAG } from '../core/snapshot/log.js'
+
 export const PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -124,6 +126,16 @@ const label = t => ({ checkpoint: 'ckpt' })[t] || t
 // As envgit log: file and network denials (and envgit's own refusals) matter; sysctl/mach lookups are noise.
 const relevant = e => e.kind === 'policy' && (/\\b(file|network)-\\S+\\s+\\S|\\bhttp-request \\S/.test(e.reason) || /^envgit: /.test(e.reason))
 
+// Data in / data out of a REPL step (docs/design.md §3.3); the same rule as dataFlag in log.ts.
+function dataFlag(st) {
+  const d = st.data
+  if (!d || d.in < ${DATA_FLAG.minIn} || d.in < ${DATA_FLAG.ratio} * d.out) return 0
+  return Math.round(d.in / Math.max(d.out, 1))
+}
+function size(n) {
+  return n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(1) + ' MB'
+}
+
 function summary(st) {
   try {
     if (st.action.type === 'exec') return JSON.parse(st.action.input).join(' ').replace(/\\s+/g, ' ')
@@ -225,6 +237,7 @@ function stepRow(st, depth, on, isHead, isPruned) {
   if (c.net) chips.push(el('span', { class: 'chip' }, c.net + ' request' + (c.net > 1 ? 's' : '')))
   if (c.netDenied || c.policy) chips.push(el('span', { class: 'chip bad' }, (c.netDenied + c.policy) + ' denied'))
   if (st.irreversible) chips.push(el('span', { class: 'chip warn' }, 'irreversible'))
+  if (st.data) chips.push(el('span', { class: 'chip' + (dataFlag(st) ? ' warn' : ''), title: 'bytes into the REPL / back to the model' }, size(st.data.in) + ' in · ' + size(st.data.out) + ' out'))
   if (st.codex) chips.push(el('span', { class: 'chip' }, 'codex'))
   if (st.agent) chips.push(el('span', { class: 'chip' }, st.agent.name + ' · ' + st.agent.tool))
   chips.push(el('span', { class: 'chip' }, time(st.startedAt)))
@@ -267,11 +280,13 @@ function showDetail() {
     el('h2', {}, 'Step ' + st.index + ' · ' + label(st.action.type)),
     el('pre', { class: 'cmd' }, st.action.type === 'exec' ? JSON.parse(st.action.input).join(' ') : summary(st)),
     st.irreversible ? el('div', { class: 'banner warn' }, 'Irreversible: ' + st.irreversible.reason + ' — rewind cannot undo what this sent out.') : '',
+    dataFlag(st) ? el('div', { class: 'banner warn' }, 'This step read ' + size(st.data.in) + ' into the REPL and gave the model ' + size(st.data.out) + ' (' + dataFlag(st) + '× less): whatever it concluded came from data the model did not see. Worth a look; not necessarily wrong.') : '',
     el('dl', {},
       el('dt', {}, 'exit'), el('dd', { class: st.exitCode ? 'mono chip bad' : 'mono' }, st.exitCode),
       el('dt', {}, 'when'), el('dd', {}, new Date(st.startedAt).toLocaleString() + ' · ' + (ms >= 1000 ? (ms / 1000).toFixed(1) + ' s' : ms + ' ms')),
       el('dt', {}, 'parent'), el('dd', { class: 'mono' }, st.parent === undefined ? 'base' : '#' + st.parent),
       el('dt', {}, 'snapshot'), el('dd', { class: 'mono' }, pruned.has(st.index) ? 'pruned' : short(st.snapshot)),
+      st.data ? [el('dt', {}, 'data'), el('dd', { class: 'mono' }, st.data.in + ' bytes in, ' + st.data.out + ' out')] : '',
       st.codex ? [el('dt', {}, 'codex call'), el('dd', { class: 'mono' }, st.codex.toolCallId)] : '',
       st.agent ? [el('dt', {}, st.agent.name), el('dd', { class: 'mono' }, st.agent.tool + (st.agent.toolUseId ? ' · ' + st.agent.toolUseId : ''))] : ''),
     pruned.has(st.index) ? el('div', { class: 'banner warn' }, 'Its snapshot was dropped to stay under snapshot.maxBytes: this step stays in the log but can no longer be rewound or forked to.') : isCurrent ? actions(st.index, st.index === head) : '',

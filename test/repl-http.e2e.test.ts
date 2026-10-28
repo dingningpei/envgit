@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -54,5 +54,12 @@ capabilities:
     expect(await execute(`const r = await fetch('${base}/ok'); await r.text()`)).toMatch(/from host/)
     expect(await execute(`const d = await fetch('${base}/deploy', { method: 'POST' }); d.status + ' ' + (await d.text())`)).toMatch(/403 envgit: POST 127\.0\.0\.1\/deploy is irreversible/)
     expect(hits).toEqual(['GET /ok'])
+  }, 30_000)
+
+  it('counts a response body as data in, and still hands the code a whole Response', async () => {
+    expect(await execute(`const r2 = await fetch('${base}/ok'); [r2.status, r2.ok, r2.headers.get('content-length'), await r2.text()].join(' ')`)).toBe('200 true 9 from host')
+    const [id] = await readdir(join(dir, '.envgit', 'sessions'))
+    const last = (await readFile(join(dir, '.envgit', 'sessions', id!, 'steps.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l)).at(-1)
+    expect(last.data).toEqual({ in: 9, out: Buffer.byteLength('200 true 9 from host\n') })
   }, 30_000)
 })

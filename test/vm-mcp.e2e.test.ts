@@ -90,6 +90,10 @@ mcp:
     expect(await execute('await fs.writeFile("from-repl.txt", "hi"); x')).toBe('1')
     // The step's file change reached the host mirror.
     expect(await readFile(join(dir, 'from-repl.txt'), 'utf8')).toBe('hi')
+    // Data in, counted by the guest's worker, reaches the step (design §3.3).
+    expect(await execute('(await fs.readFile("from-repl.txt")).length')).toBe('2')
+    const log = (await envgit('log')).stdout.trim().split('\n')
+    expect(log.at(-2)).toMatch(/in 2 out 2$/)
   }, 120_000)
 
   it('rewind brings the REPL variables back to that step', async () => {

@@ -117,6 +117,14 @@ mcp:
     // A large result stays in the sandbox; the model gets its type and works on it there.
     expect(await execute('await stub.big()')).toMatch(/^\$1 = Array\(1000\): \d+ characters [^\n]*Type: \{ id: number; body: string \}\[\]/)
     expect(await execute('$1.length')).toBe('1000')
+    // Data in, data out (design §3.3): each result counted as it reached the REPL, the handle as its line.
+    const [id] = await readdir(join(dir, '.envgit', 'sessions'))
+    const steps = (await readFile(join(dir, '.envgit', 'sessions', id!, 'steps.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as Step)
+    const at = (input: string) => steps.find(s => s.action.input === input)!.data
+    expect(at('await stub.add({ a: 1, b: 2 }) * 10')).toEqual({ in: 1, out: 3 })
+    expect(at('await stub.big()')).toMatchObject({ in: JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ id: i, body: 'b'.repeat(40) }))).length, out: expect.any(Number) })
+    expect(at('await stub.big()')!.out).toBeLessThan(300)
+    expect(at('$1.length')).toEqual({ in: 0, out: 5 })
   }, 60_000)
 
   it("puts the server inside the sandbox: its irreversible POST is stopped at the gate, its write lands on the step", async () => {

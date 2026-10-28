@@ -23,6 +23,18 @@ export interface Step {
   agent?: { name: string; tool: string; toolUseId?: string }
   snapshot?: SnapshotId
   parent?: number
+  /** REPL steps: bytes the capabilities brought into the REPL, and bytes that went back to the model (§3.3). */
+  data?: { in: number; out: number }
+}
+
+/** A REPL step that read this much and gave back this small a share is flagged for a person to look at. */
+export const DATA_FLAG = { minIn: 64 * 1024, ratio: 100 }
+
+/** in/out when a step is flagged (docs/design.md §3.3): a prompt to look, not a verdict. */
+export function dataFlag(step: Pick<Step, 'data'>): number | undefined {
+  const d = step.data
+  if (!d || d.in < DATA_FLAG.minIn || d.in < DATA_FLAG.ratio * d.out) return undefined
+  return Math.round(d.in / Math.max(d.out, 1))
 }
 
 export interface Session {

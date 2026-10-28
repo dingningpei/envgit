@@ -25,6 +25,7 @@ import {
   acquireBusy,
   activeChain,
   busyHolder,
+  dataFlag,
   createSession,
   ensureBase,
   liveSnapshots,
@@ -445,6 +446,8 @@ async function log(): Promise<number> {
       pruned.has(st.index) ? 'pruned  ' : short(st.snapshot),
       (input.length > 60 ? input.slice(0, 59) + '…' : input).padEnd(60),
       denied ? `${denied} denied` : '',
+      st.data ? `in ${size(st.data.in)} out ${size(st.data.out)}` : '',
+      dataFlag(st) ? red(`look: in/out ${dataFlag(st)}×`) : '',
       st.irreversible ? red(`irreversible: ${st.irreversible.reason}`) : '',
     ]
     console.log(cols.join('  ').trimEnd())
@@ -452,6 +455,11 @@ async function log(): Promise<number> {
   const off = steps.length - chain.length
   console.log(`head: ${head}${off ? ` (${off} step${off > 1 ? 's' : ''} off this branch)` : ''}`)
   return 0
+}
+
+/** 312, 18K, 2.4M */
+function size(n: number): string {
+  return n < 1024 ? String(n) : n < 1 << 20 ? `${Math.round(n / 1024)}K` : `${(n / (1 << 20)).toFixed(1)}M`
 }
 
 async function rewind(args: string[]): Promise<number> {

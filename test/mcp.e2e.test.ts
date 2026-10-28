@@ -79,6 +79,18 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect(log.slice(0, -1).every(s => !s.effects.some(e => e.kind === 'fs' && e.path === ssh))).toBe(true)
   }, 30_000)
 
+  it('flags a step that read much more than it gave back, in the log', async () => {
+    await writeFile(join(dir, 'big.txt'), 'line of text\n'.repeat(10_000))
+    expect((await execute("(await fs.readFile('big.txt')).split('\\n').length")).text).toMatch(/^10001\n/)
+    expect((await steps()).at(-1)!.data).toEqual({ in: 130_000, out: 6 })
+    const log = await promisify(execFile)(process.execPath, [CLI, 'log'], { cwd: dir })
+    expect(log.stdout).toMatch(/in 127K out 6 {2}look: in\/out 21667×/)
+    // Reading as much and giving it back is not flagged.
+    expect((await execute("(await fs.readFile('big.txt')).slice(0, 2000)")).isError).toBe(false)
+    expect((await steps()).at(-1)!.data).toEqual({ in: 130_000, out: 2001 })
+    expect((await promisify(execFile)(process.execPath, [CLI, 'log'], { cwd: dir })).stdout.trim().split('\n').at(-2)).not.toMatch(/look:/)
+  }, 30_000)
+
   it('refuses a concurrent envgit run while a step is executing', async () => {
     const pending = execute('await new Promise(r => setTimeout(r, 3000)); "done"')
     for (let i = 0; i < 40 && !(await access(join(dir, '.envgit/busy')).then(() => true, () => false)); i++) {

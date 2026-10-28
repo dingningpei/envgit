@@ -52,6 +52,8 @@ export async function buildCapabilities(
   workdir: string,
   onEffect: (e: Effect) => void = () => {},
   servers: Record<string, McpServerConfig> = {},
+  /** Bytes a capability brought into the REPL (data in, docs/design.md §3.3). */
+  onIn: (bytes: number) => void = () => {},
 ): Promise<Capabilities> {
   const globals: Record<string, unknown> = {}
   const decls = [
@@ -64,7 +66,9 @@ export async function buildCapabilities(
     'declare function assert(cond: unknown, message?: string): asserts cond',
   ]
   const tools: DirectTool[] = []
-  const tracedFetch = traceFetch(onEffect)
+  const tracedFetch = traceFetch(onEffect, onIn)
+  const counted = <T>(p: Promise<T>, size: (v: T) => number): Promise<T> => p.then(v => (onIn(size(v)), v))
+  const bytes = (v: unknown) => (typeof v === 'string' ? Buffer.byteLength(v) : v === undefined ? 0 : Buffer.byteLength(JSON.stringify(v) ?? ''))
 
   if (caps.fs === true) {
     const fsOp = <T>(op: 'read' | 'write', path: string, f: (abs: string) => Promise<T>): Promise<T> => {
@@ -78,9 +82,9 @@ export async function buildCapabilities(
       )
     }
     globals.fs = {
-      readFile: (path: string) => fsOp('read', path, abs => readFile(abs, 'utf8')),
+      readFile: (path: string) => counted(fsOp('read', path, abs => readFile(abs, 'utf8')), bytes),
       writeFile: (path: string, data: string) => fsOp('write', path, abs => writeFile(abs, data)),
-      readdir: (path = '.') => fsOp('read', path, async abs => (await readdir(abs, { withFileTypes: true })).map(d => (d.isDirectory() ? `${d.name}/` : d.name))),
+      readdir: (path = '.') => counted(fsOp('read', path, async abs => (await readdir(abs, { withFileTypes: true })).map(d => (d.isDirectory() ? `${d.name}/` : d.name))), bytes),
     }
     decls.push(`declare const fs: {
   readFile(path: string): Promise<string>
@@ -107,7 +111,7 @@ export async function buildCapabilities(
       clients.push(client)
       const only = caps[name]
       const listed = (await client.listTools()).filter(t => !Array.isArray(only) || only.includes(t.name))
-      globals[name] = Object.fromEntries(listed.map(t => [t.name, (args?: unknown) => client.callTool(t.name, args)]))
+      globals[name] = Object.fromEntries(listed.map(t => [t.name, (args?: unknown) => counted(client.callTool(t.name, args), bytes)]))
       decls.push(declareServer(name, listed))
       const taken = new Set(tools.map(t => t.name))
       for (const t of listed) {
@@ -122,7 +126,7 @@ export async function buildCapabilities(
   return { globals, declarations: decls.join('\n'), tools, close }
 }
 
-function traceFetch(onEffect: (e: Effect) => void): typeof fetch {
+function traceFetch(onEffect: (e: Effect) => void, onIn: (bytes: number) => void): typeof fetch {
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input)
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
@@ -133,7 +137,12 @@ function traceFetch(onEffect: (e: Effect) => void): typeof fetch {
       // A 403 from envgit's gate is already on the step as the gate's own effect; don't record it twice.
       const gated = res.status === 403 && (await res.clone().text().then(t => t.startsWith('envgit: '), () => false))
       if (!gated) onEffect(net)
-      return res
+      // Read whole to count what came in; the code gets the same bytes, buffered rather than streamed.
+      const body = await res.arrayBuffer()
+      onIn(body.byteLength)
+      const out = new Response(res.status === 204 || res.status === 304 ? null : body, { status: res.status, statusText: res.statusText, headers: res.headers })
+      Object.defineProperties(out, { url: { value: res.url }, redirected: { value: res.redirected } })
+      return out
     } catch (e) {
       if (proxyRefused(e)) onEffect({ ...net, denied: true })
       throw e

@@ -153,6 +153,7 @@ export class VmReplSession implements Repl {
     let output = ''
     let error: string | undefined
     let observed: Effect[] = []
+    let bytesIn: number | undefined
     const { effects: net } = await withEgress(this.snap.workdir, this.policy, this.gate, this.vm, async () => {
       try {
         const reply = JSON.parse(await this.call(code, env)) as WorkerMessage
@@ -160,6 +161,7 @@ export class VmReplSession implements Repl {
           output = reply.output
           error = reply.error
           observed = reply.effects
+          bytesIn = reply.in
         }
       } catch (e) {
         error = (e instanceof Error ? e.message : String(e)).replace(/^vm: /, '')
@@ -173,6 +175,8 @@ export class VmReplSession implements Repl {
       action: { type: 'repl', input: code },
       exitCode: error ? 1 : 0,
       effects,
+      // What reached the model: the output and error text, as the caller returns them.
+      ...(bytesIn !== undefined && { data: { in: bytesIn, out: Buffer.byteLength(output) + Buffer.byteLength(error ?? '') } }),
       ...(irreversible && { irreversible: { reason: irreversible } }),
     })
     return { output, error, effects, step: step.index }
