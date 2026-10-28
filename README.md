@@ -51,6 +51,7 @@ Or from source: `git clone https://github.com/dingningpei/envgit.git && cd envgi
 Then, in a project:
 
 ```bash
+envgit doctor            # checks this machine (Node, the sandbox, agent versions), each problem with its fix
 envgit init              # creates .envgit/ with a default policy (.envgit/policy.yaml)
 envgit run npm test      # runs in the sandbox and records a step
 envgit log               # the steps so far
