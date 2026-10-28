@@ -18,4 +18,10 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
     expect(stdout).toMatch(/step 4 .*\n.*\n {4}release\.sh\n {4}\w+ release script\n {4}envgit: step 4 recorded/)
     expect(stdout).toMatch(/envgit: rewound to step 2 \(2 step\(s\) undone\)\n.*\n {4}\w+ add greet\.js\n {4}\w+ release script\n {4}console\.log/)
   }, 60_000)
+
+  it('prints its usage for --help instead of running, and refuses what it does not know', async () => {
+    expect((await run(process.execPath, [CLI, 'demo', '--help'])).stdout).toMatch(/^usage: envgit demo \[--keep\] \[--pace MS\]\n/)
+    const bad = await run(process.execPath, [CLI, 'demo', '--pace', 'soon']).catch((e: { code: number; stderr: string }) => e)
+    expect(bad).toMatchObject({ code: 1, stderr: expect.stringMatching(/^envgit: usage: envgit demo/) })
+  })
 })

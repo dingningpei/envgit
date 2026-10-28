@@ -9,6 +9,7 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
@@ -48,8 +49,21 @@ const STEPS: { says: string; argv: string[] }[] = [
 ]
 const REWIND_TO = 2
 
+const USAGE = `usage: envgit demo [--keep] [--pace MS]
+  --keep      leave the temporary directory, to look around in with \`envgit ui\` or \`envgit show 3\`
+  --pace MS   wait MS milliseconds after each step and section (for recording it)`
+
 export async function demo(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(USAGE)
+    return 0
+  }
   const keep = args.includes('--keep')
+  const p = args.indexOf('--pace')
+  const pace = p >= 0 ? Number(args[p + 1]) : 0
+  const unknown = args.filter((a, i) => a !== '--keep' && (p < 0 || (i !== p && i !== p + 1)))
+  if (!Number.isInteger(pace) || pace < 0 || unknown.length) throw new Error(USAGE)
+  const pause = () => (pace ? sleep(pace) : undefined)
   const color = process.stdout.isTTY
   const dim = (s: string) => (color ? `\x1b[2m${s}\x1b[0m` : s)
   const bold = (s: string) => (color ? `\x1b[1m${s}\x1b[0m` : s)
@@ -109,6 +123,7 @@ export async function demo(args: string[]): Promise<number> {
     await writeFile(join(dir, 'release.sh'), RELEASE)
     await git('add', '.gitignore', 'release.sh')
     await git('commit', '-q', '-m', 'release script')
+    await pause()
 
     for (const [i, st] of STEPS.entries()) {
       console.log(`\n${bold(`step ${i}`)}  agent: ${st.says}`)
@@ -121,11 +136,13 @@ export async function demo(args: string[]): Promise<number> {
         if (seen.some(h => h.startsWith('POST '))) throw new Error('the push reached the remote; the demo expected it refused')
         console.log(dim('  the ref advertisement went through; the pack, POST …/git-receive-pack, never arrived'))
       } else if (code !== 0) throw new Error(`step ${i} exited ${code}`)
+      await pause()
     }
 
     console.log(`\n${bold('the timeline')}`)
     console.log('  $ envgit log')
     await envgit(['log'])
+    await pause()
     console.log(`\n${bold('rewind')} ${dim(`to step ${REWIND_TO}, after the commit: before the push, the reset and the gc`)}`)
     console.log(`  $ envgit rewind ${REWIND_TO}`)
     if ((await envgit(['rewind', String(REWIND_TO)])) !== 0) throw new Error('rewind failed')

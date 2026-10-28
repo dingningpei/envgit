@@ -59,7 +59,7 @@ const [cmd = 'help', ...args] = process.argv.slice(2)
 const help = `envgit — version control for agent execution environments
 
   envgit doctor          check this machine for what envgit needs, each problem with its fix
-  envgit demo [--keep]   thirty seconds in a temporary directory: a scripted agent's five steps,
+  envgit demo [--keep] [--pace MS]   a scripted agent's five steps in a temporary directory,
                          a git push refused at the request, a rewind (no API key, no agent)
   envgit init            create .envgit/ and a default policy
   envgit run <cmd...>    run a command in the sandbox, record a step

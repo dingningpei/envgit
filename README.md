@@ -2,6 +2,8 @@
 
 **Version control for the environment your coding agent works in.**
 
+![envgit demo: a scripted agent's five steps, a git push refused at the request, a rewind](docs/demo.gif)
+
 Coding agents such as Claude Code, Codex and Copilot CLI run for hours and execute thousands of commands, and afterwards you have a diff and a chat log. envgit records every step the agent takes in a sandbox — the command, the files it changed, the hosts it reached, what the policy denied — and snapshots the environment after each one. You can rewind to any step, fork from it, and stop the actions a rewind could never undo, such as a `git push` or a POST to a production API, before they go out.
 
 ```console
@@ -45,6 +47,8 @@ It needs Node 22 or newer, and macOS or Linux. On Linux the sandbox also needs `
 ```bash
 npm install -g agent-envgit   # the command is `envgit` (npm would not take `envgit`: too close to an existing `env-git`)
 ```
+
+Or without installing, the demo (a scripted agent, no API key): `npx -p agent-envgit envgit demo`. With npx the package has to be named apart from the command, as above: `npx -p agent-envgit envgit init`, not `npx envgit`.
 
 Or from source: `git clone https://github.com/dingningpei/envgit.git && cd envgit && npm install && npm run build && npm link`.
 
