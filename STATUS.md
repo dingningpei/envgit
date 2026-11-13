@@ -18,5 +18,4 @@
 - 之后：根据反馈决定 M6（GUI agents）是否启动。
 
 ## 待我决定
-- Show HN 什么时候发、以什么账号发。
 - 0.2.x 的反馈收口到哪里（GitHub issues？Discussions？）。
