@@ -1,0 +1,58 @@
+name: Bug report
+description: envgit failed, crashed, or did something you didn't expect
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran, what you expected, and what you got instead (paste errors as text).
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `envgit doctor`
+      description: Run it in the project where the problem happened.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: envgit version
+      placeholder: "0.2.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - WSL2
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent, if any
+      description: Which agent drove envgit (Claude Code, Codex, Copilot CLI, an MCP client, none), and its version.
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - sandbox (default)
+        - vm
+        - not sure
+  - type: textarea
+    id: export
+    attributes:
+      label: Session archive (optional)
+      description: >
+        `envgit export` writes the session as one .tar.gz that `envgit import` can replay; drag the file here.
+        **The archive holds your project's files at every recorded step, plus the step log.**
+        Attach it only if all of that is fine to make public; otherwise say so and we'll find another way.
