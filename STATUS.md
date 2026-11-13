@@ -8,7 +8,7 @@
 
 ## 上次做到哪（2026-11-12）
 - Show HN 已发：https://news.ycombinator.com/item?id=50293944
-- M7 的两个 worktree（`m7-show-diff`、`claude/m7-envgit-preset-export-…`）分支已全部并入 main，无领先提交、无未提交改动，可以清理。
+- M7 的两个 worktree（`m7-show-diff`、`claude/m7-envgit-preset-export-…`）已全部并入 main，worktree 和分支已删除。
 - 0.2.1 发布：sandbox 里不再有 system-store 噪音；`network.extraCaCertPaths`。
 - 0.2.0：`envgit demo`（--pace/--help）、README 顶部 GIF、`show`/`diff`、`export`/`import`、`doctor`。
 - `docs/design.md` §7.1 复盘：M7 先于 M6（GUI agents）；M6 是否做取决于有没有人要。
