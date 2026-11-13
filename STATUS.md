@@ -8,6 +8,7 @@
 
 ## 上次做到哪（2026-11-12）
 - Show HN 已发：https://news.ycombinator.com/item?id=50293944
+- 定了：0.2.x 反馈统一收到 GitHub Issues（Discussions 不开）。
 - M7 的两个 worktree（`m7-show-diff`、`claude/m7-envgit-preset-export-…`）已全部并入 main，worktree 和分支已删除。
 - 0.2.1 发布：sandbox 里不再有 system-store 噪音；`network.extraCaCertPaths`。
 - 0.2.0：`envgit demo`（--pace/--help）、README 顶部 GIF、`show`/`diff`、`export`/`import`、`doctor`。
@@ -18,4 +19,4 @@
 - 之后：根据反馈决定 M6（GUI agents）是否启动。
 
 ## 待我决定
-- 0.2.x 的反馈收口到哪里（GitHub issues？Discussions？）。
+（暂无）
