@@ -11,11 +11,14 @@
 - 现状核对：`envgit doctor` 通过，`npm test` 146 通过 / 22 跳过（vm），但本机 agent 还是发布时的版本；npm 上已是 Claude Code 2.1.323、Codex 0.168.0、Copilot CLI 1.0.110，都没测过。
 - 发现：作者自己没在日常用 envgit（这台 Mac 上只有本仓库有 `.envgit`，最长会话 15 步；x86 台式机没查）；Claude Code 除了 `envgit claude` 包装之外没有接入路径（桌面 app / IDE 不能记录）。
 - 定了 M8（0.3）规划：`docs/design.md` §5 第 9 条，2026-11-14 采纳。
+- 方向补充（2026-11-14）：终局是云服务器上跑很多 agent。那里沙箱运行时已有 Agent Substrate 这类项目在做，envgit 的位置是它上面的记录和控制层；本机 srt 后端是试用和开发入口。
 - 对比了 OpenAI Pando / Anthropic Scion：都是内部源码版本控制，和 envgit 不在一层；按用户决定没有写进 §8。
 
 ## 下一步
 - **下一步**：M8 第一项是 `envgit hooks install claude`（记录模式），先验证桌面 app 和 IDE 扩展是否执行项目级 hooks；同时在最新版 agent 上重跑 M5 的真实会话检查。
 - 之后：`envgit claude` 去掉逐条命令确认；作者自己连续 10 个工作日在 envgit 下跑真实会话，问题记到 GitHub Issues；0.3.0 发布后再决定是否重新发 Show HN。
+- M8 里加了一项 spike（2–3 天，x86 台式机 + kind）：envgit 接到 Agent Substrate 上是否可行（按需快照的成本、Tag fork 对应 step、gate 挂到它的 egress 策略点），结论写到 `docs/spike-substrate.md`，决定 0.4 是不是 Substrate 后端。
+- 0.4 第一候选：凭据不进沙箱，由 gate 在出站时注入。
 - M6（GUI agents）继续搁置：没有人提需求。
 
 ## 待我决定
