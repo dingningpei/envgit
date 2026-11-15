@@ -1,6 +1,25 @@
+<div align="center">
+
+<img src="docs/assets/logo.svg" alt="envgit logo: a timeline of steps with an arrow back to an earlier one" width="140">
+
 # envgit
 
 **Version control for the environment your coding agent works in.**
+
+Record every step. Rewind to any of them. Stop what can't be undone.
+
+[![npm](https://img.shields.io/npm/v/agent-envgit?color=2dd4bf&label=npm)](https://www.npmjs.com/package/agent-envgit)
+[![test](https://github.com/dingningpei/envgit/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dingningpei/envgit/actions/workflows/test.yml?query=branch%3Amain)
+[![node](https://img.shields.io/node/v/agent-envgit)](package.json)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+[Quick start](#quick-start) · [Your agent](#use-it-with-your-agent) · [Policy](#policy) · [Backends](#two-backends) · [How it works](#how-it-works) · [Design](docs/design.md)
+
+<img src="docs/assets/hero.svg" alt="A session of five steps. Step 3, a git push, is refused at the request. envgit rewind 2 puts the environment back to step 2." width="900">
+
+</div>
+
+## See it run
 
 ![envgit demo: a scripted agent's five steps, a git push refused at the request, a rewind](docs/demo.gif)
 

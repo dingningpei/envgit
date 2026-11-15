@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" width="900" height="360" role="img" aria-label="A session of five steps. Step 3, a git push, is refused at the request. envgit rewind 2 puts the environment back to step 2.">
+  <style>
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  </style>
+  <rect x="1" y="1" width="898" height="358" rx="14" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+
+  <!-- the refusal -->
+  <rect x="412" y="34" width="356" height="34" rx="17" fill="#f85149" fill-opacity="0.14" stroke="#f85149" stroke-width="1.5"/>
+  <text x="590" y="56" text-anchor="middle" class="mono" font-size="13" fill="#ff7b72">refused: POST …/git-receive-pack</text>
+  <path d="M590 68 V98" stroke="#f85149" stroke-width="1.5" stroke-dasharray="3 4"/>
+
+  <!-- timeline -->
+  <path d="M110 180 H750" stroke="#30363d" stroke-width="4" stroke-linecap="round"/>
+
+  <g class="mono" font-size="12" fill="#8b949e" text-anchor="middle">
+    <text x="110" y="118">step 0</text>
+    <text x="270" y="118">step 1</text>
+    <text x="430" y="118">step 2</text>
+    <text x="590" y="118">step 3</text>
+    <text x="750" y="118">step 4</text>
+  </g>
+  <g class="mono" font-size="13" fill="#e6edf3" text-anchor="middle">
+    <text x="110" y="142">write greet.js</text>
+    <text x="270" y="142">node greet.js</text>
+    <text x="430" y="142">git commit</text>
+    <text x="590" y="142" fill="#ff7b72">git push</text>
+    <text x="750" y="142">git reset --hard</text>
+  </g>
+
+  <circle cx="110" cy="180" r="12" fill="#0d1117" stroke="#3fb950" stroke-width="4"/>
+  <circle cx="270" cy="180" r="12" fill="#0d1117" stroke="#3fb950" stroke-width="4"/>
+  <circle cx="430" cy="180" r="12" fill="#2dd4bf" stroke="#2dd4bf" stroke-width="4"/>
+  <circle cx="590" cy="180" r="12" fill="#0d1117" stroke="#f85149" stroke-width="4"/>
+  <path d="M585 175 L595 185 M595 175 L585 185" stroke="#f85149" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="750" cy="180" r="12" fill="#0d1117" stroke="#8b949e" stroke-width="4"/>
+
+  <!-- rewind -->
+  <path d="M750 198 C750 262 438 262 432 206" fill="none" stroke="#2dd4bf" stroke-width="3" stroke-linecap="round"/>
+  <path d="M422 216 L432 202 L444 214" fill="none" stroke="#2dd4bf" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="591" y="272" text-anchor="middle" class="mono" font-size="13" fill="#2dd4bf">envgit rewind 2</text>
+
+  <!-- captions -->
+  <path d="M40 300 H860" stroke="#21262d" stroke-width="1"/>
+  <g class="sans" font-size="14" text-anchor="middle">
+    <text x="170" y="332" fill="#e6edf3">Every step is recorded</text>
+    <text x="450" y="332" fill="#e6edf3">What can't be undone is stopped</text>
+    <text x="730" y="332" fill="#e6edf3">Any step is a way back</text>
+  </g>
+</svg>
