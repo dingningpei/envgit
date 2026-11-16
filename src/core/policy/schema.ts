@@ -37,6 +37,13 @@ export interface Policy {
    * sandbox, started by the REPL worker; `${VAR}` in `env` comes from envgit's environment.
    */
   mcp?: Record<string, McpServerConfig>
+  /**
+   * Secrets the sandbox may use and not read, by the name of their environment variable. Inside, the
+   * variable holds a stand-in; the real value is put back on requests to `hosts` only (each must also
+   * be in `network.allow`). It comes from `file`, read by envgit outside the sandbox, or else from
+   * envgit's own environment. Names and paths only: this file is readable in the sandbox.
+   */
+  credentials?: Record<string, { hosts: string[]; file?: string }>
   /** Gated actions, first match wins; `- preset: default` adds envgit's stock rules at that point. */
   irreversible?: IrreversibleRule[]
   /**

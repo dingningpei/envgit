@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { fileURLToPath } from 'node:url'
 import { compileSrt, ENVGIT_CONFIG_DIR, withRealPaths } from '../src/core/policy/compile.js'
 import { Gate, judgeNet, judgeShell } from '../src/core/policy/gate.js'
-import { loadPolicy } from '../src/core/policy/load.js'
+import { loadPolicy, mcpServers } from '../src/core/policy/load.js'
 import { PRESETS } from '../src/core/policy/presets.js'
 import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -170,5 +170,19 @@ describe('the default preset', () => {
   it('is what envgit init writes', async () => {
     const p = await loadPolicy(fileURLToPath(new URL('../examples/policy.yaml', import.meta.url)))
     expect(p.irreversible).toEqual(PRESETS.default)
+  })
+})
+
+describe('mcpServers', () => {
+  it("fills ${VAR} from envgit's environment, except a declared credential, which the worker fills inside with its stand-in", () => {
+    const servers = mcpServers(
+      {
+        credentials: { GITHUB_TOKEN: { hosts: ['api.github.com'] } },
+        mcp: { github: { command: 'github-mcp-server', env: { GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}', REGION: '${REGION}', GONE: '${NOT_THERE}' } } },
+      },
+      { GITHUB_TOKEN: 'real-token', REGION: 'eu' },
+    )
+    expect(servers.github!.env).toEqual({ GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}', REGION: 'eu', GONE: '' })
+    expect(JSON.stringify(servers)).not.toContain('real-token')
   })
 })

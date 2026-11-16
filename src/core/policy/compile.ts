@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { needsInspection, tunnelDenials, type Gate } from './gate.js'
+import type { Credential } from './credentials.js'
 import type { Policy } from './schema.js'
 
 /**
@@ -46,6 +47,17 @@ export interface SrtExtra {
   denyWrite?: string[]
   allowedDomains?: string[]
   allowPty?: boolean
+  /** Credentials with a value (resolveCredentials): masked by srt, which needs TLS termination to put them back. */
+  credentials?: Credential[]
+}
+
+/**
+ * Whether the proxy terminates TLS: for request-level rules, and for a masked credential, whose real
+ * value only ever leaves over a connection the proxy itself verified. While it does, every request
+ * goes to the gate and opaque tunnels are refused, whatever the reason it was turned on.
+ */
+export function terminatesTls(policy: Policy, credentials: Credential[] = []): boolean {
+  return needsInspection(policy) || credentials.length > 0
 }
 
 export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath: string; keyPath: string }; extra?: SrtExtra } = {}): SandboxRuntimeConfig {
@@ -54,6 +66,8 @@ export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath:
   const net = { ...policy.network, allow: [...(policy.network?.allow ?? []), ...(x.allowedDomains ?? [])] }
   const tunnels = tunnelDenials(policy)
   const sockets = net.allowUnixSockets ?? []
+  const masked = x.credentials ?? []
+  if (masked.length && !gate) throw new Error('credentials need the gate: their value is put back by the proxy that terminates TLS')
   return {
     ...(x.allowPty && { allowPty: true }),
     network: {
@@ -64,7 +78,7 @@ export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath:
       // The loader has refused sockets a `socket` rule guards (load.ts).
       ...(sockets.length && (process.platform === 'linux' ? { allowAllUnixSockets: true } : { allowUnixSockets: sockets })),
       ...(gate &&
-        needsInspection(policy) && {
+        terminatesTls(policy, masked) && {
           tlsTerminate: {
             ...(net.noInspect?.length && { excludeDomains: net.noInspect }),
             // A fixed CA (vm backend) so long-lived processes keep trusting the proxy from step to step.
@@ -80,9 +94,10 @@ export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath:
           requireHostMatch: true,
         }),
     },
+    ...(masked.length > 0 && { credentials: { envVars: masked.map(c => ({ name: c.name, mode: 'mask' as const, injectHosts: c.hosts })) } }),
     filesystem: {
       // envgit's own files outside the workdir (the token `envgit claude` reads): never readable inside.
-      denyRead: withRealPaths([...(fs.read?.deny ?? []), ...(x.denyRead ?? []), ENVGIT_CONFIG_DIR]),
+      denyRead: withRealPaths([...(fs.read?.deny ?? []), ...(x.denyRead ?? []), ENVGIT_CONFIG_DIR, ...masked.flatMap(c => (c.file ? [c.file] : []))]),
       allowRead: fs.read?.allow ?? [],
       allowWrite: withRealPaths([...(fs.write?.allow ?? []), ...(x.allowWrite ?? [])]),
       // The sandbox must never rewrite its own history or snapshots.

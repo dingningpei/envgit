@@ -6,7 +6,8 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { SandboxManager, type SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
-import { compileSrt } from '../policy/compile.js'
+import { compileSrt, terminatesTls } from '../policy/compile.js'
+import { resolveCredentials, type Credential } from '../policy/credentials.js'
 import { needsInspection, type Gate } from '../policy/gate.js'
 import type { Policy } from '../policy/schema.js'
 import type { Command, Effect, Env, EnvBackend, EnvSpec, ExecResult, SnapshotId } from './backend.js'
@@ -39,9 +40,11 @@ export class SrtBackend implements EnvBackend {
       throw new Error(`srt: sandboxing is not supported on ${process.platform}`)
     }
     this.gate = spec.gate
-    this.trust = await extraTrust(spec.policy ?? {}, spec.gate)
+    // Declared in the policy, or by the caller (`envgit claude`'s own token): kept out of the sandbox.
+    const credentials = await resolveCredentials(spec.policy ?? {}, spec.srtExtra?.credentials, line => console.error(line))
+    this.trust = await extraTrust(spec.policy ?? {}, spec.gate, credentials)
     this.tmp = await mkdtemp(join(await realpath(os.tmpdir()), 'envgit-tmp-'))
-    const extra = { ...spec.srtExtra, allowWrite: [...(spec.srtExtra?.allowWrite ?? []), this.tmp] }
+    const extra = { ...spec.srtExtra, allowWrite: [...(spec.srtExtra?.allowWrite ?? []), this.tmp], credentials }
     await SandboxManager.initialize(compileSrt(spec.policy ?? {}, spec.gate, { extra }), undefined, true)
     if (!SandboxManager.isSandboxingEnabled()) throw new Error('srt: sandbox failed to initialize')
     this.env = { id: randomUUID(), backend: this.name, workdir: spec.workdir, snapshots: spec.snapshots }
@@ -135,9 +138,9 @@ export class SrtBackend implements EnvBackend {
  * through NODE_EXTRA_CA_CERTS, on top of its own roots). When the proxy terminates TLS the sandbox only
  * meets srt's CA, and the upstream is verified in envgit's own process, by the host's trust.
  */
-async function extraTrust(policy: Policy, gate?: Gate): Promise<{ dir: string; env: NodeJS.ProcessEnv } | undefined> {
+async function extraTrust(policy: Policy, gate?: Gate, credentials: Credential[] = []): Promise<{ dir: string; env: NodeJS.ProcessEnv } | undefined> {
   const paths = policy.network?.extraCaCertPaths ?? []
-  if (!paths.length || (gate && needsInspection(policy))) return undefined
+  if (!paths.length || (gate && terminatesTls(policy, credentials))) return undefined
   const certs: string[] = []
   for (const p of paths.map(p => p.replace(/^~(?=\/|$)/, os.homedir()))) {
     const pem = await readFile(p, 'utf8').catch(e => {

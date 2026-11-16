@@ -21,7 +21,7 @@ export interface Description {
 }
 
 export const CAPABILITIES_ENV = 'ENVGIT_CAPABILITIES'
-/** The MCP servers to start, `${VAR}`s already filled in by envgit outside (`mcpServers`). */
+/** The MCP servers to start, `${VAR}`s already filled in by envgit outside (`mcpServers`), except declared credentials: those are filled in here, with the stand-ins this environment holds. */
 export const MCP_ENV = 'ENVGIT_MCP'
 /**
  * A request for the injected API instead of code to run. A code string, so that it travels the vm
@@ -34,6 +34,9 @@ export const RAW = '\0envgit:raw\n'
 export async function runWorker(): Promise<void> {
   const caps = JSON.parse(process.env[CAPABILITIES_ENV] ?? '{}') as NonNullable<Policy['capabilities']>
   const servers = JSON.parse(process.env[MCP_ENV] ?? '{}') as Record<string, McpServerConfig>
+  for (const s of Object.values(servers)) {
+    if (s.env) s.env = Object.fromEntries(Object.entries(s.env).map(([k, v]) => [k, String(v).replace(/\$\{(\w+)\}/g, (_, n: string) => process.env[n] ?? '')]))
+  }
   let effects: Effect[] = []
   let bytesIn = 0
   const send = (m: WorkerMessage) => process.stdout.write(JSON.stringify(m) + '\n')

@@ -32,7 +32,7 @@ if (process.env.ASK_ONLY) {
   process.exit(0)
 }
 if (process.env.TOKEN_ONLY) {
-  // Started from the token file: the token is in the environment, the file out of reach.
+  // Started from the token file: a stand-in for the token is in the environment, the file out of reach.
   out.token = process.env.CLAUDE_CODE_OAUTH_TOKEN
   try { readFileSync(process.env.ENVGIT_CLAUDE_TOKEN_FILE); out.tokenFile = 'read' } catch (e) { out.tokenFile = e.code }
   console.log(JSON.stringify(out))
@@ -120,7 +120,7 @@ irreversible:
     expect(r.stderr).toMatch(/Create a token with `claude setup-token` and save it in .*none \(chmod 600\), or set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY/)
   })
 
-  it('starts from the token file when the environment has no credential, and keeps the file out of the sandbox', async () => {
+  it('starts from the token file when the environment has no credential, and keeps the file and the token itself out of the sandbox', async () => {
     const file = join(tokens, 'claude-oauth-token')
     await writeFile(file, 'token-from-file-not-real\n', { mode: 0o600 })
     const env: NodeJS.ProcessEnv = { ...process.env, ENVGIT_CLAUDE_AGENT: JSON.stringify([process.execPath, join(dir, 'agent.mjs')]), ENVGIT_CLAUDE_TOKEN_FILE: file, TOKEN_ONLY: '1' }
@@ -128,7 +128,10 @@ irreversible:
     delete env.ANTHROPIC_API_KEY
     const r = await run(process.execPath, [CLI, 'claude'], { cwd: dir, env })
     const out = JSON.parse(r.stdout.trim().split('\n').at(-1)!)
-    expect(out.token).toBe('token-from-file-not-real')
+    // Claude Code gets a stand-in; the proxy puts the real token back on requests to its API only.
+    expect(out.token).toMatch(/^fake_value_/)
+    expect(r.stdout + r.stderr).not.toContain('token-from-file-not-real')
+    expect(r.stderr).toMatch(/CLAUDE_CODE_OAUTH_TOKEN stays outside the sandbox; sent only to api\.anthropic\.com/)
     expect(out.tokenFile).toMatch(/EPERM|EACCES|ENOENT/)
   }, 60_000)
 

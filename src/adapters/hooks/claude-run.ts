@@ -25,6 +25,9 @@ const RELEVANT_DENIAL = /\b(file|network)-\S+\s+\S|\bhttp-request \S/
 /** Claude Code's own endpoints (code.claude.com/docs/en/network-config): always allowed. */
 export const CLAUDE_HOSTS = ['api.anthropic.com', 'claude.ai', 'platform.claude.com', 'mcp-proxy.anthropic.com']
 
+/** Where the credential is sent: put back on requests to these hosts and no others. */
+export const CLAUDE_TOKEN_HOSTS = ['api.anthropic.com']
+
 export interface ClaudeRunOptions {
   root: string
   workdir: string
@@ -56,7 +59,7 @@ export const claudeTokenFile = (env: NodeJS.ProcessEnv = process.env): string =>
 /**
  * The credential to start Claude Code with: nothing to add when the environment has one, else the
  * token file's. envgit reads the file out here; inside the sandbox its directory is read-denied
- * (compileSrt). The token itself still reaches the sandboxed process, in its environment.
+ * (compileSrt), and the token itself never goes in: Claude Code gets a stand-in (docs/design.md §4.1).
  */
 export async function claudeCredential(env: NodeJS.ProcessEnv, file = claudeTokenFile(env)): Promise<{ add: Record<string, string> } | { missing: string }> {
   if (CLAUDE_CREDENTIAL_ENV.some(k => env[k])) return { add: {} }
@@ -84,6 +87,8 @@ export function claudeUserConfig(home: string): string[] {
 export async function runClaude(o: ClaudeRunOptions): Promise<number> {
   const credential = await claudeCredential(process.env)
   if ('missing' in credential) throw new Error(credential.missing)
+  // srt reads a masked variable's real value from this process's environment, and nowhere else may carry it.
+  Object.assign(process.env, credential.add)
   const run = join(tmpdir(), `envgit-claude-${randomBytes(6).toString('hex')}`)
   const spool = join(run, 'spool')
   // Claude Code's own temp files (its Bash tool's working dirs among them) go here, not /tmp/claude-<uid>.
@@ -119,6 +124,8 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
       // Decrypted like any host when the policy has request rules (Claude Code trusts srt's CA through
       // NODE_EXTRA_CA_CERTS): an excluded host would be an opaque tunnel, which the gate refuses.
       allowedDomains: CLAUDE_HOSTS,
+      // Claude Code's own credential: a stand-in inside, the real one put back on its API requests only.
+      credentials: CLAUDE_CREDENTIAL_ENV.filter(k => process.env[k]).map(name => ({ name, hosts: CLAUDE_TOKEN_HOSTS })),
       allowPty: true,
     },
   })
@@ -142,7 +149,7 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
     {
       argv: [...o.agent, '--settings', JSON.stringify(settings), ...o.args],
       cwd: o.workdir,
-      env: { ...credential.add, [SPOOL_ENV]: spool, CLAUDE_CODE_TMPDIR: claudeTmp, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
+      env: { [SPOOL_ENV]: spool, CLAUDE_CODE_TMPDIR: claudeTmp, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
     },
     'inherit',
   )

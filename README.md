@@ -117,17 +117,22 @@ irreversible:                                   # what rewind cannot undo; first
   - preset: default                             # stock rules: git push (SSH refused, with why), npm/PyPI/
                                                 # crates publish, image pushes, GitHub/GitLab API writes
                                                 # and GraphQL mutations, the docker socket, their commands
+credentials:                                    # secrets the sandbox may use and not read
+  GITHUB_TOKEN:
+    hosts: ["api.github.com"]                   # the real value goes to these hosts only
+    file: ~/.config/envgit/github-token         # read by envgit, outside; without it, envgit's environment
 mcp:                                            # MCP servers whose tools become REPL functions
   github:
     command: github-mcp-server
     args: [stdio, --read-only]
-    env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" }   # from envgit's environment
+    env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" }   # a credential above: the server gets its stand-in
 snapshot:
   maxBytes: 10G                                 # drop the oldest rewind points to stay under this
 ```
 
 - **Network rules:** when the policy has request-level rules, the sandbox proxy terminates TLS so it can judge each HTTP(S) request by method and path, and refuses tunnels it cannot see into (plain HTTP inside CONNECT, SOCKS, SSH over the proxy).
 - **Shell rules:** these match the command line, including the commands inside an `sh -c` script. They are a best effort, so the network rules are what actually enforces.
+- **Credentials:** a variable listed under `credentials` holds a stand-in inside the sandbox. The proxy puts the real value back on requests to that credential's hosts, in headers and bodies, and nowhere else; `envgit claude` treats Claude Code's own token this way. Two limits, both in [design §4.1](docs/design.md): a listed host that hands back what it is sent gives the value away, so list API hosts only; and on macOS a secret already exported in the shell that starts envgit can be read from inside, so supply it with `file:`.
 - **Recording decisions:** every decision is recorded on the step, and the log and the UI mark the steps that reached outside. A command a rule refuses before it runs is a step too, with the reason.
 - **Nobody there:** an `ask` rule never waits for a person who is not there. Without a terminal, in `envgit claude -p`, or with `ENVGIT_UNATTENDED=1`, it is refused at once, the agent is told why and goes on, and the refusal is recorded. To let such an action through unattended, set `action: allow` on its rule.
 
@@ -181,7 +186,8 @@ Known gaps (see [design §7](docs/design.md) for the reviews and [§5](docs/desi
 - The VM backend on x86_64 Linux has been checked on one machine (WSL2 with nested KVM), not on bare metal or in CI.
 - The Codex integration relies on `codex exec-server`, which Codex marks as experimental. It was written against Codex 0.162.1.
 - Under Copilot CLI, the agent runs its own tools outside envgit's sandbox. envgit can judge shell command lines there, but not individual HTTP requests — so there it records rather than enforces.
-- The REPL connects stdio MCP servers only; remote (streamable HTTP) servers are not supported yet. A server gets the tokens you give it, and code in the REPL runs in the same sandbox, so it can read them too.
+- The REPL connects stdio MCP servers only; remote (streamable HTTP) servers are not supported yet. A server gets the tokens you give it, and code in the REPL runs in the same sandbox, so it can read them too, unless the token is declared under `credentials`: then both get its stand-in.
+- The sandbox inherits envgit's environment. Only variables declared under `credentials` are replaced; any other secret in it is readable inside.
 - With request-level network rules on, requests to IPv6-literal addresses (`http://[::1]/`) are refused: sandbox-runtime's Host check compares them in two different spellings.
 - The VM backend on macOS is nested (a Firecracker VM inside a Virtualization-framework VM), which makes a warm step ≈ 1 s; it is for trying memory-level rewind. The intended production shape is Firecracker on a Linux host.
 - On Linux, srt hides read-denied directories instead of refusing reads, so those denials don't show up in the log.

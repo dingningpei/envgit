@@ -11,6 +11,9 @@
 - 现状核对：`envgit doctor` 通过，`npm test` 146 通过 / 22 跳过（vm），但本机 agent 还是发布时的版本；npm 上已是 Claude Code 2.1.323、Codex 0.168.0、Copilot CLI 1.0.110，都没测过。
 - 发现：作者自己没在日常用 envgit（这台 Mac 上只有本仓库有 `.envgit`，最长会话 15 步；x86 台式机没查）；Claude Code 除了 `envgit claude` 包装之外没有接入路径（桌面 app / IDE 不能记录）。
 - 定了 M8（0.3）规划：`docs/design.md` §5 第 9 条，2026-11-14 采纳。
+- **M8 第三项基本完成（未 push，Linux 未跑）**：凭据不进沙箱。没有自己造，用的是 sandbox-runtime 自带的 mask：沙箱里的变量是假值，代理只在发往指定主机的请求上换回真值。envgit 加了策略写法（`credentials: { NAME: { hosts, file } }`）、取值来源、为此打开 TLS 终止；`envgit claude` 自己的 token 也这样处理（只发往 `api.anthropic.com`）；MCP server 的 `${NAME}` 拿到的也是假值。真实 Claude Code 会话验证过，测试服务器验证了替换范围，macOS `npm test` 154 通过 / 22 跳过。细节和局限在 design.md §4.1。
+- **第三项查出的两个局限（决定对外能怎么说）**：(1) 代理在请求体里也做替换，所以白名单主机如果会回显收到的内容（让模型复述、存成 gist 再读回），沙箱里的代码就能拿回真值；只应列出用请求头带凭据的 API 主机。(2) macOS 上，envgit 启动时环境变量里已有的密钥，沙箱内进程可以通过 `sysctl kern.procargs2` 读到（用假 token 实测确认），和是否 mask 无关；用 `file:` 提供的不在其中。所以不能说「读不到」，只能说「拿到的是假值、真值只发往指定主机」。
+- **第三项没验的**：用作者的 GitHub token 做 `gh api` 只读调用（命令被会话的安全检查卡住，没跑成）；验收里的 HTTPS `git push`（会改远端，目标由作者指定）；Linux。
 - **M8 第二项完成（已合并到 main：PR dingningpei/envgit#2，Linux CI 通过）**：无人值守时 `ask` 规则不等人。查下来发现没人时 gate 本来就立刻拒绝，缺的是记录和开关，所以实际做的是：被规则拒绝的命令现在记成一步（exit 126、带原因，`log` / `show` 可见），`envgit run` 和 hooks 都记；`ENVGIT_UNATTENDED=1` 关掉终端询问、MCP elicitation 和 hook 的 `ask`；`envgit claude -p` 或没有终端时自动视为无人值守，hook 直接拒绝并告诉 agent 原因和「继续做别的」。没有新增策略字段（规则自己的 `action` 就是）。真实 `envgit claude -p` 会话验证过；macOS `npm test` 150 通过 / 22 跳过。没做的：人在 agent 的弹窗里点「拒绝」的那次仍然不留记录；vm 后端的拒绝只打印不记录。
 - **M8 第一项基本完成（已合并到 main：PR dingningpei/envgit#1，Linux CI 通过）**：`envgit claude` 不再逐条确认。做法不是切权限模式，而是 wrapper 内的 pre hook 对未命中规则的调用回答 `allow`（Bash、文件工具、WebFetch、WebSearch、所有 MCP 工具）；shell 的 `ask` / `deny` 规则照旧。token 可放在 `~/.config/envgit/claude-oauth-token`。顺带堵了两个原来靠弹窗挡着的洞：沙箱内不能写 `~/.claude/settings.json` 等用户级配置，任何 srt 沙箱都不能读 `~/.config/envgit/`。真实 Claude Code 2.1.300 `-p` 会话验证过（Bash 和 Write 直接运行，`git push` 的 ask 和 `npm publish` 的 deny 都带着 envgit 的理由被拒）；`npm test`（macOS）148 通过 / 22 跳过。细节在 design.md §3.4。
 - 真实会话顺带暴露并修掉一个老问题（影响所有 srt 运行，不只 `envgit claude`）：沙箱里没有可用的临时目录，zsh 的 heredoc（Claude Code 写 commit message 的常用写法）必然失败；策略里的 `/tmp` 在 macOS 上因为是符号链接而完全不生效。现在每个沙箱有自己的临时目录，策略里的绝对路径同时按真实路径生效。
@@ -24,7 +27,7 @@
 - 对比了 OpenAI Pando / Anthropic Scion：都是内部源码版本控制，和 envgit 不在一层；按用户决定没有写进 §8。
 
 ## 下一步
-- **下一步**：M8 第三项（凭据不进沙箱、由 gate 出站时注入，先查 sandbox-runtime 自带的 `mask`）。日常开发开始改用 `envgit claude`，攒够一次 50 步以上的会话；台式机开机后用真实 Claude Code 在 Linux 上跑一次。顺手修：`envgit init` 把 `.envgit` 写进 git 的排除列表。
+- **下一步**：第三项收尾：(a) 手动跑一次 GitHub 只读验收：在一个 `envgit init` 过的目录的 policy.yaml 里加 `credentials: { GH_TOKEN: { hosts: ["api.github.com"], file: ~/.config/envgit/github-token } }`，然后用仓库里的构建运行 `envgit run gh api user --jq .login`，预期输出登录名；(b) 走 PR 让 Linux CI 跑；(c) 决定要不要做「请求体里出现假值就拒绝」的 gate 规则，以及 macOS 上环境变量来源的密钥是否靠 re-exec 清掉。之后是 M8 第四项（跟上当前 agent 版本）。日常开发开始改用 `envgit claude`，攒够一次 50 步以上的会话；台式机开机后用真实 Claude Code 在 Linux 上跑一次。顺手修：`envgit init` 把 `.envgit` 写进 git 的排除列表。
 - 之后依次：无人值守时 `ask` 规则不等人（默认拒绝并记录）；凭据不进沙箱、由 gate 出站时注入（先查 sandbox-runtime 自带的 `mask`）；在最新版 agent 上重跑 M5 的真实会话检查；自己用 10 个工作日；README 改回权限叙事；Substrate spike（只问 gate 能否挂到它的 egress 策略点）；发 0.3.0 后决定。
 - 0.4 候选：多 agent 的统一审批队列（批准沉淀成规则）、从记录生成最小权限策略、SSH 密钥能用但读不到、记录模式（`hooks install claude`）。
 - 暂停：§3.6 的关键帧快照、VM 后端、M6（GUI agents）。

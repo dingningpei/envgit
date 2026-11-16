@@ -11,6 +11,13 @@ export async function loadPolicy(path: string): Promise<Policy> {
     throw new Error(`${path}: policy must be a mapping`)
   }
   const policy = (doc ?? {}) as Policy
+  for (const [name, c] of Object.entries(policy.credentials ?? {})) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`${path}: credentials.${name} must be the name of an environment variable`)
+    if (!Array.isArray(c?.hosts) || !c.hosts.length || c.hosts.some(h => typeof h !== 'string' || !h)) throw new Error(`${path}: credentials.${name} needs hosts: the hosts its value may be sent to (e.g. ["api.github.com"])`)
+    if ('value' in (c as object)) throw new Error(`${path}: credentials.${name} must not hold the value itself (this file is readable in the sandbox); give \`file:\`, or set ${name} in envgit's environment`)
+    if (c.file !== undefined && typeof c.file !== 'string') throw new Error(`${path}: credentials.${name}.file must be a path`)
+  }
+  if (policy.credentials && Object.keys(policy.credentials).length && policy.backend === 'vm') throw new Error(`${path}: credentials are kept outside the srt sandbox only; backend: vm does not support them yet`)
   for (const rule of policy.irreversible ?? []) {
     // A typo here must not quietly turn a gate into something else.
     if (rule.action !== undefined && !['ask', 'deny', 'allow'].includes(rule.action)) {
@@ -73,7 +80,9 @@ export function mcpServers(policy: Policy, env: NodeJS.ProcessEnv = process.env)
   const out: Record<string, McpServerConfig> = {}
   for (const [name, s] of Object.entries(policy.mcp ?? {})) {
     if (policy.capabilities?.[name] === false) continue
-    const vars = Object.entries(s.env ?? {}).map(([k, v]) => [k, String(v).replace(/\$\{(\w+)\}/g, (_, n: string) => env[n] ?? '')])
+    // A declared credential is not filled in here: its `${NAME}` goes in as written and the worker,
+    // inside the sandbox, fills it from its own environment, which holds the stand-in.
+    const vars = Object.entries(s.env ?? {}).map(([k, v]) => [k, String(v).replace(/\$\{(\w+)\}/g, (m, n: string) => (policy.credentials?.[n] ? m : (env[n] ?? '')))])
     out[name] = { command: s.command, ...(s.args && { args: s.args.map(String) }), ...(vars.length && { env: Object.fromEntries(vars) }) }
   }
   return out
