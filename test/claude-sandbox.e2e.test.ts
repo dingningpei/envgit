@@ -42,8 +42,8 @@ out.mcpPre = decision(fire('PreToolUse', { tool_name: 'mcp__github__list_issues'
 out.askPre = decision(fire('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'git push origin main' } }))
 out.monitorPre = decision(fire('PreToolUse', { tool_name: 'Monitor', tool_input: { command: 'git push origin main' } }))
 // Claude Code's user-level config, which later sessions load outside any sandbox: not writable.
-// (Probed with a directory nothing uses, made and removed, so a failing deny leaves nothing behind;
-// ~/.claude itself is writable and may not exist yet, as on a CI runner.)
+// (Probed with a directory nothing uses, made and removed, so a failing deny leaves nothing behind.
+// On Linux srt blocks a deny path that does not exist yet by mounting /dev/null on it: ENOTDIR.)
 const styles = join(homedir(), '.claude', 'output-styles')
 const had = existsSync(styles)
 try { mkdirSync(join(styles, 'envgit-probe'), { recursive: true }); rmdirSync(join(styles, 'envgit-probe')); if (!had) rmdirSync(styles); out.userConfig = 'writable' } catch (e) { out.userConfig = e.code }
@@ -95,6 +95,8 @@ irreversible:
     )
     await writeFile(join(dir, 'agent.mjs'), AGENT)
     tokens = await realpath(await mkdtemp(join(tmpdir(), 'envgit-claude-tok-')))
+    // Where Claude Code keeps its state: there on any machine that has run it, not on a CI runner.
+    await mkdir(join(homedir(), '.claude'), { recursive: true })
   }, 30_000)
 
   afterAll(async () => {
@@ -138,7 +140,7 @@ irreversible:
     expect(out.mcpPre).toBe('allow')
     expect(out.askPre).toBe('ask')
     expect(out.monitorPre).toBe('ask')
-    expect(out.userConfig).toMatch(/EPERM|EACCES|EROFS/)
+    expect(out.userConfig).toMatch(/EPERM|EACCES|EROFS|ENOTDIR/)
     expect(out.probe).toMatch(/EPERM|EACCES|EROFS/)
     expect(out.offList).toBe('403')
     expect(out.deployPre).toBe('allow') // nothing on the command line to refuse
