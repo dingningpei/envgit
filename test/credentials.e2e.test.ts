@@ -72,21 +72,90 @@ describe.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('
 
   it('puts the value back on a request to its host, and nowhere else', async () => {
     seen.length = 0
-    const curl = (host: string) => `curl -sS --noproxy '' -H "Authorization: Bearer $API_TOKEN" -d "note=$API_TOKEN" "https://${host}:${port}/echo?q=$API_TOKEN"`
-    const r = await envgit(['run', 'sh', '-c', `${curl('127.0.0.1')} && echo && ${curl('localhost')}`])
+    const curl = (host: string, body: string) => `curl -sS --noproxy '' -H "Authorization: Bearer $API_TOKEN" -d "${body}" "https://${host}:${port}/echo?q=$API_TOKEN"`
+    const r = await envgit(['run', 'sh', '-c', `${curl('127.0.0.1', 'note=hello')} && echo && ${curl('localhost', 'note=$API_TOKEN')}`])
     expect(r.stdout).toBe('ok\nok')
     const [inject, other] = seen
-    // Its own host: the header carries the real value. So does the body: the proxy substitutes there
-    // too, which is why a host on the list must not be one that hands back what it is sent.
+    // Its own host: the header carries the real value.
     expect(inject!.auth).toBe(`Bearer ${REAL}`)
-    expect(inject!.body).toBe(`note=${REAL}`)
+    expect(inject!.body).toBe('note=hello')
     // Not in the URL: a query string keeps the stand-in (and so stays out of the server's access log).
     expect(inject!.url).toMatch(/^\/echo\?q=fake_value_/)
-    // Another allowed host gets the stand-in everywhere: useless there.
+    // Another allowed host gets the stand-in everywhere, body included: useless there.
     expect(other!.auth).toMatch(/^Bearer fake_value_/)
     expect(other!.body).toMatch(/^note=fake_value_/)
     expect(JSON.stringify(other)).not.toContain(REAL)
     expect(r.stdout + r.stderr).not.toContain(REAL)
+  }, 60_000)
+
+  it('refuses a body that carries the stand-in to its own host, where the proxy would put the real value', async () => {
+    seen.length = 0
+    // A host that echoes what it is sent would hand the value back; the request never leaves.
+    const big = 'x'.repeat(3 << 20) // past the gate's 1 MB body limit: scanned all the same
+    await writeFile(join(dir, 'big.txt'), `${big}`)
+    const script = [
+      `curl -sS --noproxy '' -w ' %{http_code}' -d "note=$API_TOKEN" "https://127.0.0.1:${port}/echo"; echo`,
+      `printf '%s%s' "$(cat big.txt)" "$API_TOKEN" | curl -sS --noproxy '' -w ' %{http_code}' --data-binary @- "https://127.0.0.1:${port}/echo"; echo`,
+      // A GET can carry a body too, which the gate is not shown: refused while a stand-in could be in it.
+      `curl -sS --noproxy '' -w ' %{http_code}' -X GET -d "note=$API_TOKEN" "https://127.0.0.1:${port}/echo"; echo`,
+      // A credential in a header is what it is for.
+      `curl -sS --noproxy '' -w ' %{http_code}' -H "Authorization: Bearer $API_TOKEN" "https://127.0.0.1:${port}/echo"; echo`,
+    ].join('\n')
+    const r = await envgit(['run', 'sh', '-c', script])
+    // Each refusal comes back as a 403 whose body is envgit's reason.
+    expect(r.stdout.match(/^ 403$/gm)).toHaveLength(3)
+    expect(r.stdout.match(/carries a credential's stand-in in its body/g)).toHaveLength(3)
+    expect(r.stdout).toMatch(/^ok 200$/m)
+    expect(seen.map(s => s.body)).toEqual([''])
+    expect(seen[0]!.auth).toBe(`Bearer ${REAL}`)
+    expect(r.stderr).toMatch(/carries a credential's stand-in in its body/)
+    expect(r.stdout + r.stderr).not.toContain(REAL)
+  }, 60_000)
+
+  it("keeps a credential that came in through the environment out of every process record the sandbox can read", async () => {
+    // macOS: another process's start-up environment, by sysctl kern.procargs2 (envgit's pid is handed in).
+    // Linux: every /proc/<pid>/environ the sandbox can see. Prints only whether the value was found.
+    const probe = join(dir, 'probe.py')
+    await writeFile(
+      probe,
+      `import ctypes, os, sys
+needle = open('needle.txt', 'rb').read().strip()
+pid = int(os.environ.get('PROBE_PID', '0'))
+found = []
+if sys.platform == 'darwin':
+    libc = ctypes.CDLL(None)
+    for p in [pid, os.getppid()]:
+        mib = (ctypes.c_int * 3)(1, 49, p)
+        size = ctypes.c_size_t(1 << 20)
+        buf = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0 and needle in buf.raw[:size.value]:
+            found.append(p)
+else:
+    for d in os.listdir('/proc'):
+        if d.isdigit():
+            try:
+                if needle in open('/proc/%s/environ' % d, 'rb').read(): found.append(int(d))
+            except OSError:
+                pass
+print('found' if found else 'not found', len(found))
+`,
+    )
+    const value = `${REAL}-from-env`
+    // In a file, not on the command line: envgit's own argv is in the same record the probe reads.
+    await writeFile(join(dir, 'needle.txt'), value)
+    // exec keeps the pid: PROBE_PID is envgit's, before and after it restarts itself.
+    const go = (extra: NodeJS.ProcessEnv) =>
+      run('sh', ['-c', `PROBE_PID=$$ exec "${process.execPath}" "${CLI}" run python3 probe.py`], { cwd: dir, env: { ...process.env, FROM_ENV: value, ...extra } }).catch(
+        (e: { stdout: string; stderr: string }) => e,
+      )
+    const r = await go({})
+    expect(r.stdout).toMatch(/^not found 0$/m)
+    expect(r.stderr).not.toContain(value)
+    if (process.platform === 'darwin') {
+      // The control: with the restart turned off, the same probe does find it, so the probe can see.
+      const control = await go({ ENVGIT_CREDENTIAL_STASH: '' })
+      expect(control.stdout).toMatch(/^found [1-9]/m)
+    }
   }, 60_000)
 
   it('refuses a policy that holds the value, or names no host', async () => {

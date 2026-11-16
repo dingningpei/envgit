@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { access, copyFile, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parse as parseYaml } from 'yaml'
 import { runCodexWs, serveCodexStdio } from '../adapters/codex/serve.js'
 import { httpHelper } from '../adapters/codex/http-helper.js'
 import { SrtRunner, VmRunner, type Runner } from '../adapters/codex/runners.js'
@@ -11,7 +13,7 @@ import { diffSnapshots, formatDiff, stepDiff } from '../ui/diff.js'
 import { serveUi } from '../ui/server.js'
 import { runHook, type HookEvent } from '../adapters/hooks/handler.js'
 import { COPILOT_WRITERS, type Agent } from '../adapters/hooks/normalize.js'
-import { runClaude } from '../adapters/hooks/claude-run.js'
+import { CLAUDE_CREDENTIAL_ENV, runClaude } from '../adapters/hooks/claude-run.js'
 import { relay, SPOOL_ENV } from '../adapters/hooks/spool.js'
 import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
@@ -54,8 +56,22 @@ import { exportSession, importSession } from '../core/snapshot/transfer.js'
 import { ReplSession } from '../repl/session.js'
 import { VmReplSession } from '../repl/vm-session.js'
 import { runWorker } from '../repl/worker.js'
+import { restartWithout, restoreStash } from './stash.js'
 
 const [cmd = 'help', ...args] = process.argv.slice(2)
+
+// Credentials that came in through the environment leave envgit's own start-up record before any
+// sandbox exists (macOS; src/cli/stash.ts). The names: Claude Code's, and those the policy declares.
+restoreStash()
+if (['run', 'claude', 'codex', 'codex-exec-server', 'mcp', 'vm'].includes(cmd)) {
+  let declared: string[] = []
+  try {
+    declared = Object.keys((parseYaml(readFileSync(join(process.cwd(), '.envgit', 'policy.yaml'), 'utf8')) as { credentials?: object } | null)?.credentials ?? {})
+  } catch {
+    // No policy, or one the command itself will report on.
+  }
+  restartWithout([...(cmd === 'claude' ? CLAUDE_CREDENTIAL_ENV : []), ...declared], line => console.error(line))
+}
 
 const help = `envgit — version control for agent execution environments
 

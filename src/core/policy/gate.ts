@@ -49,6 +49,11 @@ function hostMatches(pattern: string, host: string, port: number): boolean {
   return glob(h!, 'host').test(host) && (p === undefined || Number(p) === port)
 }
 
+/** A credential's `hosts` entry against a request's host, as the gate matches hosts (`*.example.com`). */
+export function credentialHostMatches(host: string, pattern: string): boolean {
+  return glob(pattern, 'host').test(host)
+}
+
 export function netRuleLabel(r: NetRule): string {
   const any = (v: string | string[] | undefined, all: string) => (v === undefined ? all : [v].flat().join('|'))
   return ['net', any(r.method, '*').toUpperCase(), r.host, any(r.path, '**'), ...(r.body ? [`body~${any(r.body.contains, '')}`] : [])].join(' ')
@@ -142,23 +147,36 @@ export function tunnelDenials(policy: Policy): { domains: string[]; reasons: Rec
   return { domains, reasons }
 }
 
-/** A request body as text, up to MAX_BODY; OVERSIZE beyond. Reads the gate's own branch of the body. */
-async function readBody(request: Request): Promise<string | typeof OVERSIZE> {
-  if (!request.body) return ''
+/**
+ * Reads the gate's own branch of a request body once: the text up to MAX_BODY (OVERSIZE beyond) when
+ * `keep`, and whether any of `needles` occurs anywhere in it, however long. The scan keeps only the
+ * last `longest - 1` bytes between chunks, so a needle split across chunks is still seen.
+ */
+async function readBody(request: Request, keep = true, needles: Buffer[] = []): Promise<{ text: string | typeof OVERSIZE; found: boolean }> {
+  if (!request.body) return { text: '', found: false }
   const reader = request.body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
+  let found = false
+  const hold = Math.max(0, ...needles.map(n => n.length)) - 1
+  let tail = Buffer.alloc(0)
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
     size += value.length
-    if (size > MAX_BODY) {
-      await reader.cancel().catch(() => {})
-      return OVERSIZE
+    if (needles.length && !found) {
+      const window = Buffer.concat([tail, value])
+      found = needles.some(n => window.includes(n))
+      tail = hold > 0 ? window.subarray(Math.max(0, window.length - hold)) : Buffer.alloc(0)
     }
-    chunks.push(value)
+    if (keep && size <= MAX_BODY) chunks.push(value)
+    // Nothing more to learn: past the size kept, and the needles found or not looked for.
+    if ((!keep || size > MAX_BODY) && (found || !needles.length)) {
+      await reader.cancel().catch(() => {})
+      break
+    }
   }
-  return Buffer.concat(chunks).toString('utf8')
+  return { text: size > MAX_BODY ? OVERSIZE : Buffer.concat(chunks).toString('utf8'), found }
 }
 
 /** Whether the policy needs request-level inspection, and with it TLS termination. */
@@ -213,6 +231,17 @@ export class Gate {
     this.approverName = name
   }
 
+  /**
+   * The stand-ins the proxy turns into a credential's real value on a request to `host` (§4.1). A
+   * request to such a host that carries one in its body is refused: the proxy would put the real
+   * value there, and a host that answers with what it was sent would hand it back to the sandbox.
+   * Headers are where a credential is meant to go, and are left alone.
+   */
+  private standInsAt?: (host: string) => Buffer[]
+  setCredentialStandIns(at: (host: string) => Buffer[]): void {
+    this.standInsAt = at
+  }
+
   /** Effects observed since the last drain: the step that just ran made them. */
   drain(): Effect[] {
     const out = this.collected
@@ -240,6 +269,13 @@ export class Gate {
       : `envgit: ${action} is irreversible (${rule}) and needs approval, but there is ${this.approverName}; to allow it without asking, set \`action: allow\` on that rule in .envgit/policy.yaml`
   }
 
+  private refuseStandIn(action: string): RequestDecision {
+    const reason = `envgit: ${action} carries a credential's stand-in in its body, where the proxy would put the real value; refused, since a host that answers with what it was sent would hand the value back. Send credentials in a header.`
+    // Recorded as the reason alone: a bare denied net effect would read as a network.l7 refusal in `log`.
+    this.collected.push({ kind: 'policy', denied: true, reason })
+    return { action: 'deny', reason, mark: 'envgit-credential' }
+  }
+
   readonly filterRequest: FilterRequestCallback = async (request, info) => {
     const url = new URL(request.url)
     const host = info?.target?.host ?? url.hostname
@@ -247,10 +283,23 @@ export class Gate {
     const target = info?.normalizedRequestTarget ?? url.pathname + url.search
     const path = target.split('?')[0] || '/'
     const req: NetRequest = { method: request.method, host, port, path }
-    if (wantsBody(this.policy, req)) req.body = (await info?.unshownBody?.()) ? OVERSIZE : await readBody(request)
-    const v = judgeNet(this.policy, req)
     const effect = { kind: 'net', host, port, method: req.method, path } as const
     const action = `${req.method} ${host}${path}`
+    // srt substitutes in a body unless it carries a Content-Encoding (then the stand-in goes out as is).
+    const standIns = request.headers.get('content-encoding') === null ? (this.standInsAt?.(host) ?? []) : []
+    const rules = wantsBody(this.policy, req)
+    if (rules || standIns.length) {
+      // A GET-like request with a body reaches the gate without it, and srt would still substitute there.
+      if (await info?.unshownBody?.()) {
+        if (standIns.length) return this.refuseStandIn(action)
+        req.body = OVERSIZE
+      } else {
+        const read = await readBody(request, rules, standIns)
+        if (read.found) return this.refuseStandIn(action)
+        if (rules) req.body = read.text
+      }
+    }
+    const v = judgeNet(this.policy, req)
     let decision: RequestDecision
     if (v.action === 'pass') return { action: 'allow' }
     if (v.action === 'deny' && 'reason' in v) {

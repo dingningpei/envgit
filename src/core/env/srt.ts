@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { SandboxManager, type SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
 import { compileSrt, terminatesTls } from '../policy/compile.js'
 import { resolveCredentials, type Credential } from '../policy/credentials.js'
-import { needsInspection, type Gate } from '../policy/gate.js'
+import { credentialHostMatches, needsInspection, type Gate } from '../policy/gate.js'
 import type { Policy } from '../policy/schema.js'
 import type { Command, Effect, Env, EnvBackend, EnvSpec, ExecResult, SnapshotId } from './backend.js'
 
@@ -47,6 +47,11 @@ export class SrtBackend implements EnvBackend {
     const extra = { ...spec.srtExtra, allowWrite: [...(spec.srtExtra?.allowWrite ?? []), this.tmp], credentials }
     await SandboxManager.initialize(compileSrt(spec.policy ?? {}, spec.gate, { extra }), undefined, true)
     if (!SandboxManager.isSandboxingEnabled()) throw new Error('srt: sandbox failed to initialize')
+    // The stand-ins srt minted, per host: the gate refuses a body that would carry one to its host (§4.1).
+    if (credentials.length && spec.gate) {
+      const registry = SandboxManager.getSentinelRegistry()
+      spec.gate.setCredentialStandIns(host => registry.sentinelsForHost(host, credentialHostMatches).map(p => p.sentinel))
+    }
     this.env = { id: randomUUID(), backend: this.name, workdir: spec.workdir, snapshots: spec.snapshots }
     return this.env
   }
