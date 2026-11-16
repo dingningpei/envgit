@@ -3,7 +3,7 @@ import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import os from 'node:os'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { SandboxManager, type SandboxViolationEvent } from '@anthropic-ai/sandbox-runtime'
 import { compileSrt } from '../policy/compile.js'
@@ -30,6 +30,8 @@ export class SrtBackend implements EnvBackend {
   private env?: Env & { workdir: string; snapshots?: EnvSpec['snapshots'] }
   private gate?: Gate
   private trust?: { dir: string; env: NodeJS.ProcessEnv }
+  /** The sandbox's TMPDIR, one per env. srt names `/tmp/claude`, which only Claude Code creates. */
+  private tmp?: string
 
   async create(spec: EnvSpec): Promise<Env> {
     if (this.env) throw new Error('srt: only one env per process')
@@ -38,7 +40,9 @@ export class SrtBackend implements EnvBackend {
     }
     this.gate = spec.gate
     this.trust = await extraTrust(spec.policy ?? {}, spec.gate)
-    await SandboxManager.initialize(compileSrt(spec.policy ?? {}, spec.gate, { extra: spec.srtExtra }), undefined, true)
+    this.tmp = await mkdtemp(join(await realpath(os.tmpdir()), 'envgit-tmp-'))
+    const extra = { ...spec.srtExtra, allowWrite: [...(spec.srtExtra?.allowWrite ?? []), this.tmp] }
+    await SandboxManager.initialize(compileSrt(spec.policy ?? {}, spec.gate, { extra }), undefined, true)
     if (!SandboxManager.isSandboxingEnabled()) throw new Error('srt: sandbox failed to initialize')
     this.env = { id: randomUUID(), backend: this.name, workdir: spec.workdir, snapshots: spec.snapshots }
     return this.env
@@ -75,6 +79,9 @@ export class SrtBackend implements EnvBackend {
     if (!file) throw new Error('srt: empty wrapped command')
     // Node's fetch ignores HTTP(S)_PROXY unless told to, and in the sandbox the proxy is the only way out.
     const childEnv: NodeJS.ProcessEnv = { NODE_USE_ENV_PROXY: '1', ...SYSTEM_ROOTS, ...this.trust?.env, ...wrapped.env, ...cmd.env }
+    // A temp dir that exists and is writable whatever the policy says about /tmp; zsh puts its
+    // here-documents under TMPPREFIX (default /tmp/zsh), not TMPDIR.
+    if (this.tmp) Object.assign(childEnv, { TMPDIR: this.tmp, TMPPREFIX: join(this.tmp, 'zsh') })
     // Node 22–24 then warn, in every node process the command starts, that the proxy agent is
     // experimental (UNDICI-EHPA): envgit's setting, not the agent's, so not the agent's output.
     childEnv.NODE_OPTIONS = [childEnv.NODE_OPTIONS, '--disable-warning=UNDICI-EHPA'].filter(Boolean).join(' ')
@@ -117,6 +124,8 @@ export class SrtBackend implements EnvBackend {
     await SandboxManager.reset()
     if (this.trust) await rm(this.trust.dir, { recursive: true, force: true })
     this.trust = undefined
+    if (this.tmp) await rm(this.tmp, { recursive: true, force: true })
+    this.tmp = undefined
   }
 }
 

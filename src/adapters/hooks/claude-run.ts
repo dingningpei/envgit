@@ -6,12 +6,13 @@
  * one sandbox, not two nested. Steps are still recorded by its hooks, relayed out of the sandbox.
  */
 import { randomBytes } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime'
 import type { Effect } from '../../core/env/backend.js'
 import { SrtBackend, toEffect } from '../../core/env/srt.js'
+import { ENVGIT_CONFIG_DIR } from '../../core/policy/compile.js'
 import { Gate } from '../../core/policy/gate.js'
 import type { Policy } from '../../core/policy/schema.js'
 import { acquireBusy, ensureBase, openSession, releaseBusy, type Snapshotting } from '../../core/snapshot/log.js'
@@ -46,17 +47,43 @@ export interface ClaudeRunOptions {
  */
 export const CLAUDE_CREDENTIAL_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
 
-export function claudeCredentialMissing(env: NodeJS.ProcessEnv): string | undefined {
-  if (CLAUDE_CREDENTIAL_ENV.some(k => env[k])) return undefined
-  return (
-    'envgit claude: Claude Code runs inside envgit\'s sandbox, where it cannot use your keychain login. ' +
-    'Set CLAUDE_CODE_OAUTH_TOKEN (create one with `claude setup-token`) or ANTHROPIC_API_KEY, then run again.'
-  )
+/**
+ * A token from `claude setup-token`, kept here (mode 0600) so starting needs no variable; the
+ * environment wins. ENVGIT_CLAUDE_TOKEN_FILE names another file (the tests do).
+ */
+export const claudeTokenFile = (env: NodeJS.ProcessEnv = process.env): string => env.ENVGIT_CLAUDE_TOKEN_FILE || join(ENVGIT_CONFIG_DIR, 'claude-oauth-token')
+
+/**
+ * The credential to start Claude Code with: nothing to add when the environment has one, else the
+ * token file's. envgit reads the file out here; inside the sandbox its directory is read-denied
+ * (compileSrt). The token itself still reaches the sandboxed process, in its environment.
+ */
+export async function claudeCredential(env: NodeJS.ProcessEnv, file = claudeTokenFile(env)): Promise<{ add: Record<string, string> } | { missing: string }> {
+  if (CLAUDE_CREDENTIAL_ENV.some(k => env[k])) return { add: {} }
+  const token = (await readFile(file, 'utf8').catch(() => '')).trim()
+  if (token) return { add: { CLAUDE_CODE_OAUTH_TOKEN: token } }
+  return {
+    missing:
+      'envgit claude: Claude Code runs inside envgit\'s sandbox, where it cannot use your keychain login. ' +
+      `Create a token with \`claude setup-token\` and save it in ${file} (chmod 600), ` +
+      'or set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, then run again.',
+  }
+}
+
+/**
+ * Claude Code's user-level configuration: what it loads, and runs, in every later session, outside
+ * any sandbox. `~/.claude` has to be writable for its transcripts and state, and with no prompt per
+ * command nothing else stands between a sandboxed command and a hook written into the user's
+ * settings. (The project's own `.claude/` is in the workdir, like `.git/hooks`: that stays open.)
+ */
+export function claudeUserConfig(home: string): string[] {
+  const c = join(home, '.claude')
+  return ['settings.json', 'settings.local.json', 'CLAUDE.md', 'keybindings.json', 'hooks', 'commands', 'agents', 'skills', 'plugins', 'output-styles', 'dev-mods', 'mods', 'scheduled-tasks', 'remote-settings.json'].map(n => join(c, n))
 }
 
 export async function runClaude(o: ClaudeRunOptions): Promise<number> {
-  const missing = claudeCredentialMissing(process.env)
-  if (missing) throw new Error(missing)
+  const credential = await claudeCredential(process.env)
+  if ('missing' in credential) throw new Error(credential.missing)
   const run = join(tmpdir(), `envgit-claude-${randomBytes(6).toString('hex')}`)
   const spool = join(run, 'spool')
   // Claude Code's own temp files (its Bash tool's working dirs among them) go here, not /tmp/claude-<uid>.
@@ -84,7 +111,8 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
       // Claude Code's state, its temp files, and the relay.
       allowWrite: [join(home, '.claude'), join(home, '.claude.json'), `${join(home, '.claude.json')}.*`, join(home, 'Library/Caches/claude-cli-nodejs'), join(home, '.cache/claude'), tmpdir(), claudeTmp, spool],
       // The stored login is out of reach on purpose (see CLAUDE_CREDENTIAL_ENV); no keychain either.
-      denyRead: [join(home, '.claude', '.credentials.json')],
+      denyRead: [join(home, '.claude', '.credentials.json'), claudeTokenFile()],
+      denyWrite: claudeUserConfig(home),
       // Decrypted like any host when the policy has request rules (Claude Code trusts srt's CA through
       // NODE_EXTRA_CA_CERTS): an excluded host would be an opaque tunnel, which the gate refuses.
       allowedDomains: CLAUDE_HOSTS,
@@ -94,7 +122,9 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
 
   const settings = {
     hooks: {
-      PreToolUse: [{ matcher: 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit', hooks: [{ type: 'command', command: o.hookCommand('pre'), timeout: 60 }] }],
+      // Every tool that would otherwise ask a person: the pre hook answers for the policy (allowUnjudged).
+      // A hook that fails or times out leaves Claude Code's own prompt in place, never a silent run.
+      PreToolUse: [{ matcher: 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit|WebFetch|WebSearch|mcp__.*', hooks: [{ type: 'command', command: o.hookCommand('pre'), timeout: 60 }] }],
       PostToolUse: [{ matcher: 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit', hooks: [{ type: 'command', command: o.hookCommand('post'), timeout: 300 }] }],
       // A command that fails (a push refused at the gate, say) is a step too, with what it tried.
       PostToolUseFailure: [{ matcher: 'Bash|PowerShell|Monitor|Edit|Write|NotebookEdit', hooks: [{ type: 'command', command: o.hookCommand('post-failed'), timeout: 300 }] }],
@@ -109,7 +139,7 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
     {
       argv: [...o.agent, '--settings', JSON.stringify(settings), ...o.args],
       cwd: o.workdir,
-      env: { [SPOOL_ENV]: spool, CLAUDE_CODE_TMPDIR: claudeTmp, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
+      env: { ...credential.add, [SPOOL_ENV]: spool, CLAUDE_CODE_TMPDIR: claudeTmp, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
     },
     'inherit',
   )
@@ -123,7 +153,7 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
     seen = v.length
     return [...backend.gated(), ...fresh]
   }
-  const ctx: HookContext = { root: o.root, workdir: o.workdir, policy: o.policy, snapshotting: o.snapshotting, sandboxEffects }
+  const ctx: HookContext = { root: o.root, workdir: o.workdir, policy: o.policy, snapshotting: o.snapshotting, sandboxEffects, allowUnjudged: true }
   const server = serveSpool(spool, req => runHook(req.agent, req.event, req.input, ctx), o.log)
 
   const ignore = () => {}

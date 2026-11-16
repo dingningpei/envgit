@@ -1,4 +1,7 @@
 /** Policy → srt settings. See docs/design.md §3.2 */
+import { realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { needsInspection, tunnelDenials, type Gate } from './gate.js'
 import type { Policy } from './schema.js'
@@ -8,6 +11,31 @@ import type { Policy } from './schema.js'
  * terminates TLS with a per-run CA (trusted in the sandbox through the usual *_CA_BUNDLE variables)
  * and hands every request to the gate. Without such rules HTTPS stays an opaque, host-allowlisted tunnel.
  */
+/** Where envgit keeps what it must read and a sandbox must not (the token file `envgit claude` reads). */
+export const ENVGIT_CONFIG_DIR = join(homedir(), '.config', 'envgit')
+
+/**
+ * Each absolute path also under the name the kernel sees. srt follows a symlink only in the cases it
+ * knows (`/tmp/x`, `/var/x` on macOS) and drops the rest, bare `/tmp` among them: `write.allow: ["/tmp"]`
+ * allowed nothing there, and a deny on a path below a symlinked directory (a dotfiles manager's
+ * `~/.config`) would deny nothing.
+ */
+export function withRealPaths(paths: string[]): string[] {
+  const out: string[] = []
+  for (const p of paths) {
+    if (!out.includes(p)) out.push(p)
+    const abs = p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p
+    if (!isAbsolute(abs) || /[*?[\]{}]/.test(abs)) continue
+    try {
+      const real = realpathSync(abs)
+      if (real !== abs && !out.includes(real)) out.push(real)
+    } catch {
+      // Not there (yet): the name as written is all there is.
+    }
+  }
+  return out
+}
+
 /**
  * What one run needs beyond the policy — e.g. `envgit claude`, whose own process lives in the sandbox:
  * its config dir writable, its API hosts allowed.
@@ -15,6 +43,7 @@ import type { Policy } from './schema.js'
 export interface SrtExtra {
   allowWrite?: string[]
   denyRead?: string[]
+  denyWrite?: string[]
   allowedDomains?: string[]
   allowPty?: boolean
 }
@@ -52,11 +81,12 @@ export function compileSrt(policy: Policy, gate?: Gate, opts: { ca?: { certPath:
         }),
     },
     filesystem: {
-      denyRead: [...(fs.read?.deny ?? []), ...(x.denyRead ?? [])],
+      // envgit's own files outside the workdir (the token `envgit claude` reads): never readable inside.
+      denyRead: withRealPaths([...(fs.read?.deny ?? []), ...(x.denyRead ?? []), ENVGIT_CONFIG_DIR]),
       allowRead: fs.read?.allow ?? [],
-      allowWrite: [...(fs.write?.allow ?? []), ...(x.allowWrite ?? [])],
+      allowWrite: withRealPaths([...(fs.write?.allow ?? []), ...(x.allowWrite ?? [])]),
       // The sandbox must never rewrite its own history or snapshots.
-      denyWrite: [...(fs.write?.deny ?? []), '.envgit'],
+      denyWrite: withRealPaths([...(fs.write?.deny ?? []), ...(x.denyWrite ?? []), '.envgit']),
     },
   }
 }

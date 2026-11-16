@@ -25,6 +25,13 @@ export interface HookContext {
    * and the sandbox denials since the last step, which go on the step being recorded.
    */
   sandboxEffects?: () => Effect[]
+  /**
+   * Set only by `envgit claude`, where the sandbox and the gate are the boundary: a call no rule
+   * stops is answered `allow`, so the agent does not ask a person before every command. Elsewhere
+   * (installed hooks, where the agent runs outside envgit's sandbox) the hook stays silent and the
+   * agent's own permission flow decides.
+   */
+  allowUnjudged?: boolean
 }
 
 /** Per kind, as on vm: a `npm install` must not put tens of thousands of paths in the log. */
@@ -52,20 +59,23 @@ async function pre(ev: ToolEvent, ctx: HookContext): Promise<string> {
       await ensureBase(session, ctx.snapshotting)
     })
   }
-  if (!ev.command) return ''
-  const hit = judgeShell(ctx.policy, ['sh', '-c', ev.command])
-  if (!hit || hit.action === 'allow') return ''
+  const decide = (decision: 'allow' | 'ask' | 'deny', reason: string): string =>
+    JSON.stringify(
+      ev.agent === 'claude-code'
+        ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: reason } }
+        : { permissionDecision: decision, permissionDecisionReason: reason },
+    )
+  // Monitor runs a command line too, though it is not a step (normalize's SHELL): judged all the same.
+  const input = (ev.input ?? {}) as Record<string, unknown>
+  const command = ev.command ?? (ev.tool === 'Monitor' && typeof input.command === 'string' ? input.command : undefined)
+  const hit = command ? judgeShell(ctx.policy, ['sh', '-c', command]) : undefined
+  if (!hit || hit.action === 'allow') return ctx.allowUnjudged ? decide('allow', 'envgit: inside the sandbox, no rule in the policy stops this') : ''
   // `ask` goes to the agent's own approval prompt; envgit has no terminal of its own here.
   const reason =
     hit.action === 'deny'
-      ? `envgit: \`${ev.command}\` is irreversible (${hit.rule}) and the policy denies it`
-      : `envgit: \`${ev.command}\` is irreversible (${hit.rule}): rewind cannot undo it, so it needs your approval`
-  const decision = hit.action === 'deny' ? 'deny' : 'ask'
-  return JSON.stringify(
-    ev.agent === 'claude-code'
-      ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: reason } }
-      : { permissionDecision: decision, permissionDecisionReason: reason },
-  )
+      ? `envgit: \`${command}\` is irreversible (${hit.rule}) and the policy denies it`
+      : `envgit: \`${command}\` is irreversible (${hit.rule}): rewind cannot undo it, so it needs your approval`
+  return decide(hit.action === 'deny' ? 'deny' : 'ask', reason)
 }
 
 /** Snapshots the workdir and lists what differs from the head step's snapshot. */

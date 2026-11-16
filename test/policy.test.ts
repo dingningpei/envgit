@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { fileURLToPath } from 'node:url'
-import { compileSrt } from '../src/core/policy/compile.js'
+import { compileSrt, ENVGIT_CONFIG_DIR, withRealPaths } from '../src/core/policy/compile.js'
 import { Gate, judgeNet, judgeShell } from '../src/core/policy/gate.js'
 import { loadPolicy } from '../src/core/policy/load.js'
 import { PRESETS } from '../src/core/policy/presets.js'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { shellQuote } from '../src/core/env/srt.js'
@@ -19,18 +19,34 @@ describe('compileSrt', () => {
         deniedDomainReasons: { '*:22': expect.stringMatching(/"git push over SSH".*use an https:\/\/ remote/) },
       },
       filesystem: {
-        denyRead: ['~/.ssh', '~/.aws', '**/.env'],
+        // Each path also under its real name (macOS: /tmp is /private/tmp); envgit's own token files, always.
+        denyRead: withRealPaths(['~/.ssh', '~/.aws', '**/.env', ENVGIT_CONFIG_DIR]),
         allowRead: ['.'],
-        allowWrite: ['.', '/tmp'],
+        allowWrite: withRealPaths(['.', '/tmp']),
         denyWrite: ['.env', '.envgit'],
       },
     })
   })
 
+  it('names a path below a symlink by its real name too, and leaves globs, relative and missing paths alone', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'envgit-real-')))
+    await mkdir(join(dir, 'target', 'sub'), { recursive: true })
+    await symlink(join(dir, 'target'), join(dir, 'link'))
+    expect(withRealPaths([join(dir, 'link'), join(dir, 'link', 'sub'), join(dir, 'target'), '.', '**/.env', join(dir, 'missing')])).toEqual([
+      join(dir, 'link'),
+      join(dir, 'target'),
+      join(dir, 'link', 'sub'),
+      join(dir, 'target', 'sub'),
+      '.',
+      '**/.env',
+      join(dir, 'missing'),
+    ])
+  })
+
   it('defaults to no network and no writes', () => {
     expect(compileSrt({})).toEqual({
       network: { allowedDomains: [], deniedDomains: [] },
-      filesystem: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: ['.envgit'] },
+      filesystem: { denyRead: withRealPaths([ENVGIT_CONFIG_DIR]), allowRead: [], allowWrite: [], denyWrite: ['.envgit'] },
     })
   })
 })

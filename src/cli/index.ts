@@ -69,8 +69,9 @@ const help = `envgit — version control for agent execution environments
                          is a step in the sandbox (srt or vm), each apply_patch a step
   envgit codex-exec-server   the same, as a stdio exec-server for ~/.codex/environments.toml
   envgit claude [args...]  run Claude Code inside envgit's sandbox and gate: each tool call that
-                         can change files is a step, every request it makes is judged (srt;
-                         needs CLAUDE_CODE_OAUTH_TOKEN from \`claude setup-token\`, or ANTHROPIC_API_KEY)
+                         can change files is a step, every request it makes is judged, and it asks
+                         only where a rule says ask (srt; the token from \`claude setup-token\` in
+                         ~/.config/envgit/claude-oauth-token, or CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY)
   envgit hooks install|uninstall copilot   the same hooks for Copilot CLI (.github/hooks/envgit.json)
   envgit log                     show the steps leading to the current state
   envgit show <step>             one step in full: its action, effects, and the diff against
