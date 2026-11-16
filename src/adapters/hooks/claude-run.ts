@@ -13,7 +13,7 @@ import { SandboxManager } from '@anthropic-ai/sandbox-runtime'
 import type { Effect } from '../../core/env/backend.js'
 import { SrtBackend, toEffect } from '../../core/env/srt.js'
 import { ENVGIT_CONFIG_DIR } from '../../core/policy/compile.js'
-import { Gate } from '../../core/policy/gate.js'
+import { Gate, unattendedSetting } from '../../core/policy/gate.js'
 import type { Policy } from '../../core/policy/schema.js'
 import { acquireBusy, ensureBase, openSession, releaseBusy, type Snapshotting } from '../../core/snapshot/log.js'
 import { runHook, type HookContext } from './handler.js'
@@ -98,6 +98,9 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
     await releaseBusy(o.root)
   }
 
+  // Print mode, or no terminal at all: nobody will see Claude Code's approval prompt, so a shell `ask`
+  // rule is refused by the hook, with a reason, instead of becoming a prompt (ENVGIT_UNATTENDED overrides).
+  const unattended = unattendedSetting() ?? (o.args.some(a => a === '-p' || a === '--print') || !(process.stdin.isTTY && process.stdout.isTTY))
   // Claude Code owns the terminal; the exec-server-less hooks protocol has no channel for an approval.
   const gate = new Gate(o.policy, undefined, 'no way to ask while Claude Code holds the terminal')
   const backend = new SrtBackend()
@@ -153,7 +156,7 @@ export async function runClaude(o: ClaudeRunOptions): Promise<number> {
     seen = v.length
     return [...backend.gated(), ...fresh]
   }
-  const ctx: HookContext = { root: o.root, workdir: o.workdir, policy: o.policy, snapshotting: o.snapshotting, sandboxEffects, allowUnjudged: true }
+  const ctx: HookContext = { root: o.root, workdir: o.workdir, policy: o.policy, snapshotting: o.snapshotting, sandboxEffects, allowUnjudged: true, unattended }
   const server = serveSpool(spool, req => runHook(req.agent, req.event, req.input, ctx), o.log)
 
   const ignore = () => {}

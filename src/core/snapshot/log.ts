@@ -177,6 +177,31 @@ export async function ensureBase(session: OpenSession, snap: Snapshotting): Prom
   await writeMeta(session)
 }
 
+/**
+ * A call the policy refused before it ran, as a step: what was tried, and the reason as a denied
+ * policy effect (as the Codex adapter records it). It points at head's snapshot and takes none, so a
+ * write made in the background is not pinned on a command that never ran. The caller holds the busy lock.
+ */
+export async function recordRefusal(
+  root: string,
+  snap: Snapshotting,
+  r: { command: string[]; reason: string; agent?: Step['agent'] },
+): Promise<Step & { session: string }> {
+  const session = await openSession(root, 'srt')
+  await ensureBase(session, snap)
+  const at = await snapshotOf(session, await readHead(session.dir))
+  const now = new Date().toISOString()
+  const step = await recordStep(session, at ? { ...snap, take: async () => at } : snap, {
+    startedAt: now,
+    endedAt: now,
+    action: { type: 'exec', input: JSON.stringify(r.command) },
+    exitCode: 126,
+    effects: [{ kind: 'policy', denied: true, reason: r.reason }],
+    ...(r.agent && { agent: r.agent }),
+  })
+  return { ...step, session: session.meta.id }
+}
+
 /** Per kind: a step like `npm install` must not put tens of thousands of paths in the log. */
 const MAX_FS_EFFECTS = 1000
 

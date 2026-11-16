@@ -20,9 +20,9 @@ irreversible:
 `
 
 /** Runs `envgit hook …` the way an agent does: JSON on stdin, decision on stdout. */
-function hook(cwd: string, agent: string, event: string, payload: unknown): Promise<{ code: number; stdout: string; stderr: string }> {
+function hook(cwd: string, agent: string, event: string, payload: unknown, env: NodeJS.ProcessEnv = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, [CLI, 'hook', agent, event], { cwd })
+    const child = spawn(process.execPath, [CLI, 'hook', agent, event], { cwd, env: { ...process.env, ENVGIT_UNATTENDED: '', ...env } })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', d => (stdout += d))
@@ -52,21 +52,49 @@ describe('agent hooks (e2e, needs `npm run build`)', () => {
     expect(denied.code).toBe(0)
     expect(JSON.parse(denied.stdout).hookSpecificOutput).toMatchObject({ hookEventName: 'PreToolUse', permissionDecision: 'deny' })
     expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason).toMatch(/irreversible \(shell: git push\) and the policy denies it/)
+    // The refused call never runs, so no post hook follows: the refusal is its step, at the snapshot it found.
+    const refusal = (await steps()).at(-1)!
+    expect(refusal).toMatchObject({ exitCode: 126, agent: { name: 'claude-code', tool: 'Bash', toolUseId: 't1' } })
+    expect(JSON.parse(refusal.action.input)).toEqual(['git add -A && git push origin main'])
+    expect(refusal.effects).toEqual([{ kind: 'policy', denied: true, reason: expect.stringMatching(/shell: git push\) and the policy denies it/) }])
+    const before = (await steps()).length
     const asked = await hook(dir, 'claude-code', 'pre', { tool_name: 'Bash', tool_input: { command: 'npm publish' } })
     expect(JSON.parse(asked.stdout).hookSpecificOutput.permissionDecision).toBe('ask')
     expect((await hook(dir, 'claude-code', 'pre', { tool_name: 'Bash', tool_input: { command: 'ls' } })).stdout).toBe('')
+    expect((await steps()).length).toBe(before) // an `ask` handed to the agent's prompt is not a refusal yet
+    // Unattended, nobody would see that prompt: the hook refuses, says why and how to allow it, and records it.
+    const alone = await hook(dir, 'claude-code', 'pre', { tool_name: 'Bash', tool_input: { command: 'npm publish' }, tool_use_id: 't2' }, { ENVGIT_UNATTENDED: '1' })
+    expect(JSON.parse(alone.stdout).hookSpecificOutput).toMatchObject({ permissionDecision: 'deny', permissionDecisionReason: expect.stringMatching(/needs approval, but this run is unattended, so it was not run\. Go on with the rest\. To allow it without asking, set `action: allow`/) })
+    expect((await steps()).at(-1)).toMatchObject({ exitCode: 126, snapshot: refusal.snapshot, agent: { toolUseId: 't2' } })
+    expect((await steps()).length).toBe(before + 1)
+    expect((await run(process.execPath, [CLI, 'log'], { cwd: dir })).stdout).toMatch(/exit 126 .* npm publish +1 denied/)
+    expect((await run(process.execPath, [CLI, 'show', String(before)], { cwd: dir })).stdout).toMatch(/denied envgit: `npm publish` is irreversible .* this run is unattended/)
+  })
+
+  it('records a command `envgit run` refuses, and does not wait when nobody can be asked', async () => {
+    const before = (await steps()).length
+    const t0 = Date.now()
+    const r = await run(process.execPath, [CLI, 'run', 'npm', 'publish'], { cwd: dir }).catch((e: { code: number; stderr: string }) => e)
+    expect('code' in r && r.code).toBe(1)
+    expect(Date.now() - t0).toBeLessThan(10_000)
+    expect(r.stderr).toMatch(/needs approval, but there is nobody to ask/)
+    const all = await steps()
+    expect(all.length).toBe(before + 1)
+    expect(all.at(-1)).toMatchObject({ exitCode: 126, snapshot: all.at(-2)!.snapshot })
+    expect(JSON.parse(all.at(-1)!.action.input)).toEqual(['npm', 'publish'])
     // The first hook took the base snapshot, before anything changed.
     const session = JSON.parse(await readFile(join(dir, '.envgit/sessions', (await readFile(join(dir, '.envgit/current'), 'utf8')).trim(), 'session.json'), 'utf8'))
     expect(session.base).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('records a step after each tool call that can change files, with the files it changed', async () => {
+    const first = (await steps()).length // after the refusals recorded above
     await writeFile(join(dir, 'b.txt'), 'new\n') // as Claude's Write tool would
     await hook(dir, 'claude-code', 'post', { tool_name: 'Write', tool_input: { file_path: join(dir, 'b.txt'), content: 'new\n' }, tool_use_id: 'w1', tool_response: {} })
     await writeFile(join(dir, 'a.txt'), 'two\n') // as `sed -i` in Bash would
     await hook(dir, 'claude-code', 'post', { tool_name: 'Bash', tool_input: { command: "sed -i '' s/one/two/ a.txt" }, tool_use_id: 'b1' })
     await hook(dir, 'claude-code', 'post', { tool_name: 'Read', tool_input: { file_path: join(dir, 'a.txt') } })
-    const [w, b, ...rest] = await steps()
+    const [w, b, ...rest] = (await steps()).slice(first)
     expect(rest).toEqual([])
     expect(w!.action).toEqual({ type: 'fs', input: JSON.stringify([{ op: 'write', path: 'b.txt' }]) })
     expect(w!.effects).toEqual([{ kind: 'fs', op: 'write', path: 'b.txt' }])
@@ -74,8 +102,8 @@ describe('agent hooks (e2e, needs `npm run build`)', () => {
     expect(JSON.parse(b!.action.input)).toEqual(["sed -i '' s/one/two/ a.txt"])
     expect(b!.effects).toEqual([{ kind: 'fs', op: 'write', path: 'a.txt' }])
     // And they rewind like any other step.
-    const r = await run(process.execPath, [CLI, 'rewind', '0'], { cwd: dir })
-    expect(r.stderr).toMatch(/rewound to step 0/)
+    const r = await run(process.execPath, [CLI, 'rewind', String(first)], { cwd: dir })
+    expect(r.stderr).toMatch(new RegExp(`rewound to step ${first}`))
     expect(await readFile(join(dir, 'a.txt'), 'utf8')).toBe('one\n')
   }, 30_000)
 

@@ -25,6 +25,12 @@ const settings = JSON.parse(process.argv[process.argv.indexOf('--settings') + 1]
 const fire = (event, payload) => execSync(settings.hooks[event][0].hooks[0].command, { input: JSON.stringify(payload) }).toString()
 const out = { sandbox: settings.sandbox, rest: process.argv.slice(process.argv.indexOf('--settings') + 2), matcher: settings.hooks.PreToolUse[0].matcher }
 const decision = s => (s.trim() ? JSON.parse(s).hookSpecificOutput.permissionDecision : '')
+if (process.env.ASK_ONLY) {
+  // Print mode: nobody will see a prompt, so the shell \`ask\` rule refuses, and the refusal is a step.
+  const o = JSON.parse(fire('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'git push origin main' }, tool_use_id: 'a1' })).hookSpecificOutput
+  console.log(JSON.stringify({ decision: o.permissionDecision, reason: o.permissionDecisionReason, edit: decision(fire('PreToolUse', { tool_name: 'Edit', tool_input: { file_path: 'out.txt' } })) }))
+  process.exit(0)
+}
 if (process.env.TOKEN_ONLY) {
   // Started from the token file: the token is in the environment, the file out of reach.
   out.token = process.env.CLAUDE_CODE_OAUTH_TOKEN
@@ -126,10 +132,26 @@ irreversible:
     expect(out.tokenFile).toMatch(/EPERM|EACCES|ENOENT/)
   }, 60_000)
 
+  it('in print mode refuses an ask rule itself, with a reason to go on by, and records the refusal', async () => {
+    const env: NodeJS.ProcessEnv = { ...process.env, ENVGIT_CLAUDE_AGENT: JSON.stringify([process.execPath, join(dir, 'agent.mjs')]), ANTHROPIC_API_KEY: 'test-key-not-real', ASK_ONLY: '1' }
+    delete env.ENVGIT_UNATTENDED
+    const r = await run(process.execPath, [CLI, 'claude', '-p', 'hello'], { cwd: dir, env })
+    const out = JSON.parse(r.stdout.trim().split('\n').at(-1)!)
+    expect(out.decision).toBe('deny')
+    expect(out.reason).toMatch(/`git push origin main` is irreversible \(shell: git push\) and needs approval, but this run is unattended, so it was not run\. Go on with the rest/)
+    expect(out.edit).toBe('allow')
+    const current = (await readFile(join(dir, '.envgit/current'), 'utf8')).trim()
+    const steps = (await readFile(join(dir, '.envgit/sessions', current, 'steps.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l) as Step)
+    const refusals = steps.filter(s => s.agent?.toolUseId === 'a1')
+    expect(refusals).toHaveLength(1)
+    expect(refusals[0]).toMatchObject({ exitCode: 126, effects: [{ kind: 'policy', denied: true, reason: expect.stringMatching(/this run is unattended/) }] })
+  }, 60_000)
+
   it('runs claude inside srt: its own sandbox off, writes and hosts confined, the POST stopped at the request, steps recorded', async () => {
     const r = await run(process.execPath, [CLI, 'claude', '-p', 'hello'], {
       cwd: dir,
-      env: { ...process.env, ENVGIT_CLAUDE_AGENT: JSON.stringify([process.execPath, join(dir, 'agent.mjs')]), PROBE: probe, BASE: base, ANTHROPIC_API_KEY: 'test-key-not-real' },
+      // ENVGIT_UNATTENDED=0: someone is at Claude Code's prompt, whatever `-p` and the test's pipes suggest.
+      env: { ...process.env, ENVGIT_CLAUDE_AGENT: JSON.stringify([process.execPath, join(dir, 'agent.mjs')]), PROBE: probe, BASE: base, ANTHROPIC_API_KEY: 'test-key-not-real', ENVGIT_UNATTENDED: '0' },
     })
     const out = JSON.parse(r.stdout.trim().split('\n').at(-1)!)
     expect(out.sandbox).toEqual({ enabled: false })
@@ -164,7 +186,7 @@ irreversible:
     const all = steps.flatMap(s => s.effects)
     expect(all).toContainEqual(expect.objectContaining({ kind: 'policy', reason: expect.stringMatching(/network-outbound example\.com:80/) }))
     // srt's system-lookup noise is left out, and no checkpoint is recorded for nothing.
-    expect(all.every(e => e.kind !== 'policy' || /\b(file|network)-|\bhttp-request /.test(e.reason))).toBe(true)
+    expect(all.every(e => e.kind !== 'policy' || /\b(file|network)-|\bhttp-request |^envgit: /.test(e.reason))).toBe(true) // (or a refusal of envgit's own, from the print-mode run above)
     expect(all).toContainEqual(expect.objectContaining({ kind: 'policy', reason: expect.stringMatching(/http-request CONNECT .*tunnel carries no TLS/) }))
     expect(steps.filter(s => s.action.type === 'checkpoint').every(s => s.effects.length > 0)).toBe(true)
     expect((await run(process.execPath, [CLI, 'log'], { cwd: dir })).stdout).toMatch(/curl -X POST .* \d+ denied/)

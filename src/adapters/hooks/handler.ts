@@ -8,9 +8,9 @@
  */
 import { relative, isAbsolute } from 'node:path'
 import type { Effect, SnapshotId } from '../../core/env/backend.js'
-import { irreversibleOf, judgeShell } from '../../core/policy/gate.js'
+import { irreversibleOf, judgeShell, unattendedRefusal } from '../../core/policy/gate.js'
 import type { Policy } from '../../core/policy/schema.js'
-import { acquireBusy, ensureBase, openSession, readHead, recordStep, releaseBusy, snapshotOf, type Snapshotting, type Step } from '../../core/snapshot/log.js'
+import { acquireBusy, ensureBase, openSession, readHead, recordRefusal, recordStep, releaseBusy, snapshotOf, type Snapshotting, type Step } from '../../core/snapshot/log.js'
 import { changesFiles, normalize, type Agent, type ToolEvent } from './normalize.js'
 
 export type HookEvent = 'pre' | 'post' | 'post-failed' | 'stop'
@@ -32,6 +32,12 @@ export interface HookContext {
    * agent's own permission flow decides.
    */
   allowUnjudged?: boolean
+  /**
+   * Nobody is there to answer the agent's approval prompt (`envgit claude -p`, ENVGIT_UNATTENDED=1):
+   * an `ask` rule is refused here, with a reason the agent can act on, instead of handed to a prompt
+   * that nobody will see. Never inferred from the hook process itself, whose stdin is always a pipe.
+   */
+  unattended?: boolean
 }
 
 /** Per kind, as on vm: a `npm install` must not put tens of thousands of paths in the log. */
@@ -70,12 +76,16 @@ async function pre(ev: ToolEvent, ctx: HookContext): Promise<string> {
   const command = ev.command ?? (ev.tool === 'Monitor' && typeof input.command === 'string' ? input.command : undefined)
   const hit = command ? judgeShell(ctx.policy, ['sh', '-c', command]) : undefined
   if (!hit || hit.action === 'allow') return ctx.allowUnjudged ? decide('allow', 'envgit: inside the sandbox, no rule in the policy stops this') : ''
-  // `ask` goes to the agent's own approval prompt; envgit has no terminal of its own here.
-  const reason =
-    hit.action === 'deny'
-      ? `envgit: \`${command}\` is irreversible (${hit.rule}) and the policy denies it`
-      : `envgit: \`${command}\` is irreversible (${hit.rule}): rewind cannot undo it, so it needs your approval`
-  return decide(hit.action === 'deny' ? 'deny' : 'ask', reason)
+  // `ask` goes to the agent's own approval prompt (envgit has no terminal of its own here), unless
+  // nobody is there to see it.
+  if (hit.action === 'ask' && !ctx.unattended) return decide('ask', `envgit: \`${command}\` is irreversible (${hit.rule}): rewind cannot undo it, so it needs your approval`)
+  const reason = hit.action === 'deny' ? `envgit: \`${command}\` is irreversible (${hit.rule}) and the policy denies it` : unattendedRefusal(command!, hit.rule)
+  // The call will not run, so no post hook will record it: the refusal is the step. Recorded after
+  // the decision is made and apart from it — a record that fails must not turn a refusal into no answer.
+  await withBusy(ctx, async () => {
+    await recordRefusal(ctx.root, ctx.snapshotting, { command: [command!], reason, agent: { name: ev.agent, tool: ev.tool, ...(ev.toolUseId && { toolUseId: ev.toolUseId }) } })
+  }).catch(e => console.error(`envgit: could not record the refusal: ${e instanceof Error ? e.message : e}`))
+  return decide('deny', reason)
 }
 
 /** Snapshots the workdir and lists what differs from the head step's snapshot. */

@@ -178,6 +178,24 @@ export type Approver = (req: ApprovalRequest) => Promise<boolean>
 /** No one to ask: an `ask` rule denies, and the reason says how to allow it on purpose. */
 export const noApprover: Approver = async () => false
 
+/**
+ * ENVGIT_UNATTENDED=1: nobody is there, so nothing may wait for a person — not the terminal prompt,
+ * not an MCP client's elicitation, not the agent's own approval prompt. An `ask` rule then refuses at
+ * once, as it does wherever nobody can be asked; `action: allow` on a rule is how the policy lets it
+ * go instead. `0` says the opposite where envgit would otherwise infer it (`envgit claude -p`).
+ */
+export const UNATTENDED_ENV = 'ENVGIT_UNATTENDED'
+export function unattendedSetting(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env[UNATTENDED_ENV]
+  return v === undefined || v === '' ? undefined : v !== '0'
+}
+export const UNATTENDED = `nobody to ask (an unattended run)`
+
+/** What an agent is told when an `ask` rule meets an unattended run: what, why, and that it can go on. */
+export function unattendedRefusal(command: string, rule: string): string {
+  return `envgit: \`${command}\` is irreversible (${rule}) and needs approval, but this run is unattended, so it was not run. Go on with the rest. To allow it without asking, set \`action: allow\` on that rule in .envgit/policy.yaml`
+}
+
 export class Gate {
   private collected: Effect[] = []
   /** Approvals are asked one at a time; concurrent requests wait their turn. */

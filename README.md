@@ -128,7 +128,8 @@ snapshot:
 
 - **Network rules:** when the policy has request-level rules, the sandbox proxy terminates TLS so it can judge each HTTP(S) request by method and path, and refuses tunnels it cannot see into (plain HTTP inside CONNECT, SOCKS, SSH over the proxy).
 - **Shell rules:** these match the command line, including the commands inside an `sh -c` script. They are a best effort, so the network rules are what actually enforces.
-- **Recording decisions:** every decision is recorded on the step, and the log and the UI mark the steps that reached outside.
+- **Recording decisions:** every decision is recorded on the step, and the log and the UI mark the steps that reached outside. A command a rule refuses before it runs is a step too, with the reason.
+- **Nobody there:** an `ask` rule never waits for a person who is not there. Without a terminal, in `envgit claude -p`, or with `ENVGIT_UNATTENDED=1`, it is refused at once, the agent is told why and goes on, and the refusal is recorded. To let such an action through unattended, set `action: allow` on its rule.
 
 See [`examples/policy.yaml`](examples/policy.yaml) and [design §3.2, §4](docs/design.md).
 

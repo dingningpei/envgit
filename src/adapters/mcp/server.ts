@@ -8,7 +8,7 @@ import type { Repl } from '../../repl/session.js'
 import { RAW } from '../../repl/worker.js'
 import { HANDLE_LIMIT, OUTPUT_LIMIT } from '../../repl/engine.js'
 import type { Effect } from '../../core/env/backend.js'
-import type { Approver, Gate } from '../../core/policy/gate.js'
+import { unattendedSetting, type Approver, type Gate } from '../../core/policy/gate.js'
 
 export type McpMode = 'repl' | 'tools'
 
@@ -56,7 +56,8 @@ function registerExecute(server: McpServer, repl: Repl, declarations: string) {
 /** Once the client has said what it supports: if it can elicit, `ask` rules ask its user. */
 export function askThroughClient(server: McpServer, gate: Gate): void {
   server.server.oninitialized = () => {
-    if (server.server.getClientCapabilities()?.elicitation) gate.setApprover(elicitApprover(server), 'the MCP client')
+    // An unattended run does not wait on the client's user either: `ask` rules refuse.
+    if (!unattendedSetting() && server.server.getClientCapabilities()?.elicitation) gate.setApprover(elicitApprover(server), 'the MCP client')
   }
 }
 

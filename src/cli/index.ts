@@ -17,7 +17,7 @@ import { SrtBackend } from '../core/env/srt.js'
 import { L2_NET_ENV } from '../core/env/vm-egress.js'
 import { recordVmStep, reportMirror, withEgress } from '../core/env/vm-step.js'
 import { buildPrebuiltBase, copyVmSnapshots, gcVmSnapshots, tarFrom, VmBackend, VmClient, vmDown, vmPaths, vmImageStamp, vmSnapshotExists, vmStale, vmUp } from '../core/env/vm.js'
-import { Gate, irreversibleOf, needsInspection } from '../core/policy/gate.js'
+import { Gate, irreversibleOf, needsInspection, UNATTENDED, unattendedSetting } from '../core/policy/gate.js'
 import { ttyApprover } from './approve.js'
 import { demo } from './demo.js'
 import { runDoctor } from './doctor.js'
@@ -35,6 +35,7 @@ import {
   readHead,
   readPruned,
   readSteps,
+  recordRefusal,
   recordStep,
   releaseBusy,
   snapshotOf,
@@ -105,7 +106,8 @@ const ROOT = join(process.cwd(), '.envgit')
 const POLICY = join(ROOT, 'policy.yaml')
 const DEFAULT_POLICY = fileURLToPath(new URL('../../examples/policy.yaml', import.meta.url))
 /** srt violation lines worth showing: fs, network or proxy refusals with a target, not sysctl/mach noise. */
-const RELEVANT_DENIAL = /\b(file|network)-\S+\s+\S|\bhttp-request \S/
+// srt's denials with a target, and envgit's own refusals (a command a rule stopped before it ran), as the UI shows them.
+const RELEVANT_DENIAL = /\b(file|network)-\S+\s+\S|\bhttp-request \S|^envgit: /
 
 function snapshotting(policy: Policy): Snapshotting {
   const store = new SnapshotStore(ROOT)
@@ -142,6 +144,14 @@ async function run(argv: string[]): Promise<number> {
   const shell = await gate.checkShell(argv)
   if (shell.refused) {
     console.error(red(shell.refused))
+    // A refusal is a step too: what was tried, and why it did not run. (Not on vm, whose steps are
+    // the guest's snapshots: there it is only printed.)
+    if (policy.backend !== 'vm') {
+      const step = await acquireBusy(ROOT)
+        .then(() => recordRefusal(ROOT, snapshotting(policy), { command: argv, reason: shell.refused! }).finally(() => releaseBusy(ROOT)))
+        .catch(e => (console.error(`envgit: could not record the refusal: ${e instanceof Error ? e.message : e}`), undefined))
+      if (step) console.error(`envgit: step ${step.index} recorded in session ${step.session}`)
+    }
     return 1
   }
   if (policy.backend === 'vm') return runVm(argv, policy, gate, shell.irreversible)
@@ -187,6 +197,7 @@ function reportEffects(effects: Effect[]): void {
 
 /** A gate that asks at the terminal when there is one; otherwise `ask` rules deny. */
 function terminalGate(policy: Policy): Gate {
+  if (unattendedSetting()) return new Gate(policy, undefined, UNATTENDED)
   const tty = ttyApprover()
   return tty ? new Gate(policy, tty, 'the terminal') : new Gate(policy)
 }
@@ -292,7 +303,7 @@ async function hook(argv: string[]): Promise<number> {
       console.error('envgit: hooks record steps with fs-level snapshots on the host; this workdir uses backend: vm, so nothing is recorded')
       return 0
     }
-    const out = await runHook(agent, event, input, { root: ROOT, workdir: process.cwd(), policy, snapshotting: snapshotting(policy) })
+    const out = await runHook(agent, event, input, { root: ROOT, workdir: process.cwd(), policy, snapshotting: snapshotting(policy), unattended: unattendedSetting() === true })
     if (out) process.stdout.write(out + '\n')
   } catch (e) {
     // Never wedge the agent; a pre hook that fails allows.

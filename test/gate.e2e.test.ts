@@ -127,6 +127,9 @@ irreversible:
     const r = await envgit('run', 'rm', '-rf', '/')
     expect(r.code).toBe(1)
     expect(r.stderr).toMatch(/is irreversible \(shell: rm -rf \/\) and the policy denies it/)
-    expect((await steps()).length).toBe(n)
+    // It never started, and that is on the record: a step at the same snapshot, with the reason.
+    const all = await steps()
+    expect(all.length).toBe(n + 1)
+    expect(all.at(-1)).toMatchObject({ exitCode: 126, snapshot: all.at(-2)!.snapshot, effects: [{ kind: 'policy', denied: true, reason: expect.stringMatching(/the policy denies it/) }] })
   }, 30_000)
 })
