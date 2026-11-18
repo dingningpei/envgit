@@ -184,7 +184,8 @@ What works today:
 
 Known gaps (see [design §7](docs/design.md) for the reviews and [§5](docs/design.md) for what is next, M7):
 - The VM backend on x86_64 Linux has been checked on one machine (WSL2 with nested KVM), not on bare metal or in CI.
-- The Codex integration relies on `codex exec-server`, which Codex marks as experimental. It was written against Codex 0.162.1.
+- The Codex integration relies on `codex exec-server`, which Codex marks as experimental. It was written against Codex 0.162.1 and last checked on 0.169.1.
+- In the srt sandbox, a private-network IP address (10/8, 172.16/12, 192.168/16, link-local) written as an address skips the proxy (sandbox-runtime puts these ranges in `NO_PROXY`) and is then refused, so it cannot be reached even when `network.allow` lists it. A host name goes through the proxy as usual.
 - Under Copilot CLI, the agent runs its own tools outside envgit's sandbox. envgit can judge shell command lines there, but not individual HTTP requests — so there it records rather than enforces.
 - The REPL connects stdio MCP servers only; remote (streamable HTTP) servers are not supported yet. A server gets the tokens you give it, and code in the REPL runs in the same sandbox, so it can read them too, unless the token is declared under `credentials`: then both get its stand-in.
 - The sandbox inherits envgit's environment. Only variables declared under `credentials` are replaced; any other secret in it is readable inside.

@@ -6,7 +6,8 @@
 ## 当前目标
 0.3（M8，`docs/design.md` §5 第 9 条，2026-11-14 按 §7.3 改写）：**沙箱里没有可偷的东西，agent 也不被人拦住**。方向定为权限（默认拒读、凭据不进沙箱、不可逆动作在请求层拦截），记录是证据，回退是附带功能。先让作者自己在 `envgit claude` 下跑 10 个工作日，再决定是否重新发 Show HN。
 
-## 上次做到哪（2026-11-16）
+## 上次做到哪（2026-11-17）
+- **M8 第四项完成（分支 `m8-agent-versions`，待 PR / Linux CI）**：按当天最新版测，不是计划里写的版本：Claude Code 2.1.327、Codex 0.169.1、Copilot CLI 1.0.113、sandbox-runtime 0.0.83。没有东西坏：srt 0.0.83 加新 agent 下 `npm test` 156 通过 / 22 跳过；`doctor` 的版本已更新。真实会话检查没对 github.com 推（会话的安全检查不让朝 GitHub 发 push，哪怕 gate 会拒），改用 Mac 局域网地址上的假 git 远端：`envgit run`、真实 `envgit claude -p`、真实 `envgit codex exec` 的 push 都在 POST 处被拒、记为 denied net 效果，远端只收到 GET。Copilot 装 hooks 后（`-p` 要加 `--trust-folder`）shell 和编辑各记一步。顺带发现（0.0.81 就有，不是新问题）：srt 把私有网段放进 `NO_PROXY`，写成 IP 的内网地址绕过代理后被拒，`network.allow` 里列了也连不上；已写进 README 已知局限，没修。本机三个 agent 已升级到上述版本。
 - 发布两周后复盘（`docs/design.md` §7.2）：HN 帖子（https://news.ycombinator.com/item?id=50293944）1 分、4 条有效评论（都在回应 `~/.ssh` 的开头或文风，没人谈到请求级拦截或 rewind）；GitHub 14 天 27 个独立访客、1 star、0 issue。结论是「没被看到」，不是「被否定」。帖子标题没带 `Show HN:` 前缀。
 - 现状核对：`envgit doctor` 通过，`npm test` 146 通过 / 22 跳过（vm），但本机 agent 还是发布时的版本；npm 上已是 Claude Code 2.1.323、Codex 0.168.0、Copilot CLI 1.0.110，都没测过。
 - 发现：作者自己没在日常用 envgit（这台 Mac 上只有本仓库有 `.envgit`，最长会话 15 步；x86 台式机没查）；Claude Code 除了 `envgit claude` 包装之外没有接入路径（桌面 app / IDE 不能记录）。
@@ -27,7 +28,7 @@
 - 对比了 OpenAI Pando / Anthropic Scion：都是内部源码版本控制，和 envgit 不在一层；按用户决定没有写进 §8。
 
 ## 下一步
-- **下一步**：第三项收尾：(a) 手动跑一次 GitHub 只读验收：在一个 `envgit init` 过的目录的 policy.yaml 里加 `credentials: { GH_TOKEN: { hosts: ["api.github.com"], file: ~/.config/envgit/github-token } }`，然后用仓库里的构建运行 `envgit run gh api user --jq .login`，预期输出登录名。之后是 M8 第四项（跟上当前 agent 版本）。日常开发开始改用 `envgit claude`，攒够一次 50 步以上的会话；台式机开机后用真实 Claude Code 在 Linux 上跑一次。顺手修：`envgit init` 把 `.envgit` 写进 git 的排除列表。
+- **下一步**：第三项收尾：(a) 手动跑一次 GitHub 只读验收：在一个 `envgit init` 过的目录的 policy.yaml 里加 `credentials: { GH_TOKEN: { hosts: ["api.github.com"], file: ~/.config/envgit/github-token } }`，然后用仓库里的构建运行 `envgit run gh api user --jq .login`，预期输出登录名。第四项走 PR 让 Linux CI 跑，之后是第五项（自己用 10 个工作日）。日常开发开始改用 `envgit claude`，攒够一次 50 步以上的会话；台式机开机后用真实 Claude Code 在 Linux 上跑一次。顺手修：`envgit init` 把 `.envgit` 写进 git 的排除列表。
 - 之后依次：无人值守时 `ask` 规则不等人（默认拒绝并记录）；凭据不进沙箱、由 gate 出站时注入（先查 sandbox-runtime 自带的 `mask`）；在最新版 agent 上重跑 M5 的真实会话检查；自己用 10 个工作日；README 改回权限叙事；Substrate spike（只问 gate 能否挂到它的 egress 策略点）；发 0.3.0 后决定。
 - 0.4 候选：多 agent 的统一审批队列（批准沉淀成规则）、从记录生成最小权限策略、SSH 密钥能用但读不到、记录模式（`hooks install claude`）。
 - 暂停：§3.6 的关键帧快照、VM 后端、M6（GUI agents）。

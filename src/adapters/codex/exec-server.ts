@@ -1,5 +1,5 @@
 /**
- * Codex's environment, served by envgit (docs/design.md §3.4). Codex (0.162.1; the upstream
+ * Codex's environment, served by envgit (docs/design.md §3.4). Codex (written against 0.162.1, checked on 0.169.1; the upstream
  * `codex exec-server` is marked experimental) sends every command and file operation to an
  * "exec-server" over JSON-RPC. envgit stands in as that server:
  *

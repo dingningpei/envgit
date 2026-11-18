@@ -12,7 +12,7 @@ import { SrtBackend } from '../core/env/srt.js'
 import { vmDir } from '../core/env/vm.js'
 
 /** The agent versions envgit was last checked against (docs/design.md §3.4). */
-export const TESTED = { claude: '2.1.300', codex: '0.162.1', copilot: '1.0.104' }
+export const TESTED = { claude: '2.1.327', codex: '0.169.1', copilot: '1.0.113' }
 
 export interface Check {
   /** `fail`: envgit will not work; `warn`: something will not; `info`: optional and absent. */
